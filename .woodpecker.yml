@@ -1,0 +1,18 @@
+# Woodpecker CI pipeline for Codeberg.
+#
+# To enable: visit https://ci.codeberg.org/ , sign in with your Codeberg
+# account, and toggle CI on for this repository. The first push after that
+# triggers a build.
+
+when:
+  - event: push
+  - event: pull_request
+
+steps:
+  - name: bats
+    image: ubuntu:24.04
+    commands:
+      - apt-get update -qq
+      - apt-get install -y --no-install-recommends bats shellcheck
+      - shellcheck --severity=warning -e SC1091,SC2155 hydra.sh
+      - bats tests/

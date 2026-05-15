@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  bats:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install bats and shellcheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bats shellcheck
+
+      - name: Shellcheck (lint hydra.sh)
+        # Disable a few warnings that don't add signal here:
+        #   SC1091 = source / "Not following: dynamic path"
+        #   SC2155 = declare-and-assign
+        run: shellcheck --severity=warning -e SC1091,SC2155 hydra.sh
+
+      - name: Run bats suite
+        run: bats tests/

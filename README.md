@@ -1,5 +1,6 @@
 # Hydra — Multi-OS Bootable USB Builder + VM Tester
 
+[![Tests](https://github.com/CryptoJones/Hydra/actions/workflows/test.yml/badge.svg)](https://github.com/CryptoJones/Hydra/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 Build a [Ventoy](https://github.com/ventoy/Ventoy)-based multi-boot USB stick
