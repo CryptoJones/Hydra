@@ -179,4 +179,4 @@ Note: Hydra's code is Apache 2.0, but the *tools it orchestrates* carry their
 own licenses (Ventoy is GPLv3, etc.). Hydra does not redistribute them; it
 downloads them from their official sources at runtime.
 
-Proudly Made in Nebraska. Go Big Red! 🌽 https://xkcd.com/1654/
+Proudly Made in Nebraska. Go Big Red! 🌽 https://xkcd.com/2347/
