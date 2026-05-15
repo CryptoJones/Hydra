@@ -1,0 +1,16 @@
+# Hydra runtime artifacts
+# Downloaded ISOs, Ventoy archives, extracted tools — large + reproducible.
+*.iso
+*.iso.torrent
+ventoy-*-linux.tar.gz
+ventoy-*-linux/
+
+# Common editor / OS clutter
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# Logs
+*.log
