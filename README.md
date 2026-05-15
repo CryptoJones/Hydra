@@ -136,6 +136,23 @@ involved setup and requires the proprietary extension pack for some features.
 
 ---
 
+## Testing
+
+```bash
+sudo apt install bats   # (or dnf / pacman; also installed by ./hydra.sh deps)
+bats tests/
+```
+
+The suite covers CLI dispatch, error paths on the destructive subcommands,
+URL constant substitution from `HYDRA_*_VERSION` env overrides, and the
+script-structure invariants (shebang, SPDX header, sourcing guard). No
+sudo, no real block devices, no network — safe to run on any host.
+
+See `tests/README.md` for the full inventory and how to add tests for new
+functionality.
+
+---
+
 ## Upstream projects
 
 Hydra is a thin orchestrator on top of several excellent tools — please

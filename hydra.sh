@@ -105,11 +105,11 @@ cmd_deps() {
     # Detect package manager
     if command -v apt-get >/dev/null 2>&1; then
         sudo apt-get update -qq
-        sudo apt-get install -y aria2 qemu-system-x86 qemu-utils ovmf parted gdisk wget curl tar
+        sudo apt-get install -y aria2 qemu-system-x86 qemu-utils ovmf parted gdisk wget curl tar bats
     elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y aria2 qemu-system-x86 qemu-img edk2-ovmf parted gdisk wget curl tar
+        sudo dnf install -y aria2 qemu-system-x86 qemu-img edk2-ovmf parted gdisk wget curl tar bats
     elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -Sy --noconfirm aria2 qemu-base edk2-ovmf parted gptfdisk wget curl tar
+        sudo pacman -Sy --noconfirm aria2 qemu-base edk2-ovmf parted gptfdisk wget curl tar bats
     else
         die "Unsupported package manager. Install: aria2 qemu-system-x86 ovmf parted gdisk manually."
     fi
@@ -319,4 +319,8 @@ main() {
     esac
 }
 
-main "$@"
+# Only execute main() when run directly. Allows tests to `source hydra.sh`
+# and call internal functions without triggering CLI dispatch.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
