@@ -32,6 +32,7 @@ chmod +x hydra.sh
 ./hydra.sh check
 
 # One-time tool install (apt / dnf / pacman; needs sudo)
+# Installs: aria2, qemu-system-x86, qemu-utils, ovmf, parted, gdisk, wget, curl, tar
 ./hydra.sh deps
 
 # Download Ventoy + Ubuntu + Kali (idempotent — re-runs skip already-fetched files)
@@ -53,6 +54,26 @@ Or, all in one shot:
 ```bash
 ./hydra.sh all /dev/sdX
 ```
+
+---
+
+## Dependencies
+
+`./hydra.sh deps` installs everything below via your distro's package manager
+(`apt`, `dnf`, or `pacman` — detected automatically). All of these are
+mainstream and freely available.
+
+| Tool | Purpose |
+|---|---|
+| **[aria2](https://aria2.github.io/)** | **Required for Kali Live download.** Kali distributes Live ISOs only via BitTorrent on cdimage.kali.org. `aria2c` speaks both HTTP and BitTorrent, so the `download` step fetches the `.torrent` file via HTTP and then pulls the actual ISO from peers. The script will refuse to download Kali without `aria2c` on `PATH`. |
+| **qemu-system-x86 / qemu-utils** | Boot-test step. `hydra test` launches a QEMU/KVM VM that boots from your physical USB stick. |
+| **ovmf / edk2-ovmf** | UEFI firmware for QEMU. Lets the VM emulate a modern UEFI machine instead of legacy BIOS. |
+| **parted / gdisk** | Used internally by Ventoy when partitioning the USB. |
+| **wget / curl / tar** | Fetch Ventoy + Ubuntu, extract the Ventoy archive. |
+
+If you can't (or don't want to) install dependencies via `./hydra.sh deps` —
+e.g. you're on a hardened system — install just `aria2` manually for the Kali
+step, and skip the `test` subcommand to avoid needing QEMU.
 
 ---
 
