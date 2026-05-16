@@ -107,6 +107,36 @@ teardown() {
     [[ "$output" == *"Usage:"* ]] || [[ "$output" == *"test"* ]]
 }
 
+@test "test --writable-scratch flag is recognized in arg parsing" {
+    # Pass --writable-scratch with a non-existent device. The flag should
+    # parse cleanly; the failure should be from validate-usb-device, not
+    # from "unknown flag".
+    run bash "$HYDRA" test --writable-scratch /dev/this-does-not-exist-XXX
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not a block device"* ]]
+    [[ "$output" != *"Unknown flag"* ]]
+}
+
+@test "test rejects unknown flag" {
+    run bash "$HYDRA" test --frobnicate /dev/sda
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Unknown flag"* ]]
+    [[ "$output" == *"frobnicate"* ]]
+}
+
+@test "test rejects two positional device args" {
+    run bash "$HYDRA" test /dev/sda /dev/sdb
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"single device"* ]] || [[ "$output" == *"test takes"* ]]
+}
+
+@test "help output documents --writable-scratch + HYDRA_SCRATCH_DIR" {
+    run bash "$HYDRA" help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--writable-scratch"* ]]
+    [[ "$output" == *"HYDRA_SCRATCH_DIR"* ]]
+}
+
 @test "persistence with no device argument exits with clear error" {
     run bash "$HYDRA" persistence
     [ "$status" -ne 0 ]

@@ -24,7 +24,12 @@
 #                                      the free space (one OS only). Default (no
 #                                      flags): Kali takes everything available.
 #                                      Each enabled OS prompts for its own passphrase.
-#   ./hydra.sh test [/dev/sdX]        Boot a QEMU VM from the physical USB (or ISO dir).
+#   ./hydra.sh test </dev/sdX> [--writable-scratch]
+#                                      Boot a QEMU VM from the physical USB.
+#                                      --writable-scratch: copy the stick to a temp
+#                                        image first; QEMU mutates the copy, the real
+#                                        stick is untouched. Required to verify
+#                                        Ventoy persistence in QEMU.
 #   ./hydra.sh all </dev/sdX> [--skip-downloads] [--skip-deps]
 #                                      Run deps -> download -> usb -> copy -> test.
 #                                      --skip-downloads: ISOs + Ventoy tarball are
@@ -39,6 +44,8 @@
 #   HYDRA_KALI_VERSION         Default 2026.1
 #   HYDRA_VM_MEMORY            QEMU RAM in MB (default 4096)
 #   HYDRA_VM_VCPUS             QEMU vCPU count (default 2)
+#   HYDRA_SCRATCH_DIR          Where --writable-scratch writes its temp image
+#                              (default /var/tmp — disk-backed, multi-GB safe)
 #
 # Safety:
 #   The `usb` and `all` subcommands write to a block device. The script
@@ -907,7 +914,9 @@ main() {
         test)         cmd_test         "$@" ;;
         all)          cmd_all          "$@" ;;
         -h|--help|help)
-            sed -n '2,30p' "$0"
+            # Print the full header banner — usage, env overrides, safety —
+            # up to (but not including) the `set -euo pipefail` line.
+            sed -n '2,/^set -euo pipefail/p' "$0" | sed '$d'
             ;;
         *)
             die "Unknown subcommand: $sub. Try './hydra.sh help'."

@@ -268,13 +268,29 @@ sudo apt install qemu-system-x86 qemu-utils ovmf
 
 **4. Boot the stick in QEMU.**
 
+Two modes:
+
 ```bash
-./hydra.sh test /dev/sdX
+./hydra.sh test /dev/sdX                    # read-only — safe but persistence won't activate
+./hydra.sh test /dev/sdX --writable-scratch # writable scratch copy — full persistence verification
 ```
 
-A QEMU window opens with the physical USB as the boot drive. You should
-see Ventoy's menu listing Ubuntu + Kali. Pick either; verify it boots
-all the way to a desktop. Close the QEMU window when satisfied.
+**Plain `./hydra.sh test`** mounts the physical stick read-only as a
+virtio drive. Fast (no copy) and the real stick is untouched, but
+Ventoy's initramfs persistence-loading hook doesn't fire reliably
+under this configuration — meaning persistence verification fails
+inside QEMU even when the build is correct on real hardware.
+
+**`--writable-scratch`** first `dd`'s the stick into a temp image
+under `$HYDRA_SCRATCH_DIR` (default `/var/tmp`), then boots QEMU
+against the scratch image with writes enabled. Persistence works
+(writes go to the scratch image, not the real stick), and the
+scratch is deleted on QEMU exit. The dd step takes a few minutes
+on a USB 3.0 stick.
+
+Either way, a QEMU window opens with Ventoy's menu listing Ubuntu +
+Kali. Pick either; verify it boots all the way to a desktop. Close
+the QEMU window when satisfied.
 
 **What "pass" looks like:**
 
@@ -285,10 +301,14 @@ all the way to a desktop. Close the QEMU window when satisfied.
       `persistence-kali.dat` + `ventoy/ventoy.json`.
 - [ ] QEMU boot reaches the Ventoy menu without complaint.
 - [ ] Picking Ubuntu boots to the GNOME desktop.
-- [ ] Picking Kali → **Live USB Encrypted Persistence** prompts for the
-      passphrase, then boots Kali with `/` writable. Create a file in
-      `/home/kali`, reboot via QEMU, re-enter the passphrase, confirm
-      the file is still there.
+- [ ] **With `--writable-scratch`**, picking Kali → **Live USB Encrypted
+      Persistence** prompts for the passphrase, then boots Kali with `/`
+      writable. Create a file in `/home/kali`, reboot via QEMU, re-enter
+      the passphrase, confirm the file is still there.
+- [ ] Without `--writable-scratch`, persistence is expected NOT to
+      activate (Ventoy hook limitation under read-only virtio).
+      Validate persistence on real hardware instead, or rerun with
+      `--writable-scratch`.
 
 **If any step fails:**
 
