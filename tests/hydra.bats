@@ -85,6 +85,32 @@ teardown() {
     [[ "$output" == *"Usage:"* ]] || [[ "$output" == *"test"* ]]
 }
 
+@test "persistence with no device argument exits with clear error" {
+    run bash "$HYDRA" persistence
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no device specified"* ]] || [[ "$output" == *"Usage:"* ]]
+}
+
+@test "persistence refuses a non-existent device path" {
+    run bash "$HYDRA" persistence /dev/this-does-not-exist-XXX
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not a block device"* ]]
+}
+
+@test "persistence refuses a regular file (not a block device)" {
+    local f="$BATS_TEST_TMPDIR/not-a-device"
+    touch "$f"
+    run bash "$HYDRA" persistence "$f"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not a block device"* ]]
+}
+
+@test "help output mentions the persistence subcommand" {
+    run bash "$HYDRA" help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"persistence"* ]]
+}
+
 # ---------- Function-level tests (source hydra.sh) ----------
 
 @test "URL constants pick up HYDRA_VENTOY_VERSION env override" {
@@ -136,6 +162,63 @@ teardown() {
     run validate_usb_device "$f"
     [ "$status" -ne 0 ]
     [[ "$output" == *"not a block device"* ]]
+}
+
+@test "HYDRA_REPO_URL defaults to the CryptoJones Hydra URL" {
+    source "$HYDRA"
+    [[ "$HYDRA_REPO_URL" == "https://github.com/CryptoJones/Hydra" ]]
+}
+
+@test "HYDRA_REPO_URL env var overrides the default" {
+    HYDRA_REPO_URL="https://example.test/forked-hydra" source "$HYDRA"
+    [[ "$HYDRA_REPO_URL" == "https://example.test/forked-hydra" ]]
+}
+
+@test "write_hydra_url_file emits CRLF-terminated InternetShortcut format" {
+    source "$HYDRA"
+    # Stub sudo so the helper writes as the test user instead of escalating.
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    local mnt
+    mnt=$(mktemp -d -t hydra-urltest-XXXX)
+    HYDRA_REPO_URL="https://example.test/hydra" write_hydra_url_file "$mnt"
+
+    [ -f "$mnt/Hydra.url" ]
+    # Format check: section header, URL line, CRLF line endings.
+    grep -q '^\[InternetShortcut\]' "$mnt/Hydra.url"
+    grep -q '^URL=https://example.test/hydra' "$mnt/Hydra.url"
+    # Each line must end with CR LF (\r\n) so Windows honours the .url format.
+    [ "$(awk '/\r$/{c++} END{print c}' "$mnt/Hydra.url")" = "2" ]
+
+    rm -rf "$mnt"
+}
+
+@test "write_hydra_url_file is idempotent when the file already exists" {
+    source "$HYDRA"
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    local mnt
+    mnt=$(mktemp -d -t hydra-urltest-XXXX)
+    printf 'original content\r\n' > "$mnt/Hydra.url"
+    local mtime_before
+    mtime_before=$(stat -c %Y "$mnt/Hydra.url")
+    sleep 1
+    write_hydra_url_file "$mnt"
+    local mtime_after
+    mtime_after=$(stat -c %Y "$mnt/Hydra.url")
+    [ "$mtime_before" = "$mtime_after" ]
+    # And content must NOT have been overwritten.
+    grep -q '^original content' "$mnt/Hydra.url"
+
+    rm -rf "$mnt"
 }
 
 # ---------- Sanity: shellcheck-style invariants ----------

@@ -15,6 +15,9 @@
 #   ./hydra.sh download               Download Ventoy + Ubuntu + Kali ISOs (idempotent).
 #   ./hydra.sh usb </dev/sdX>         Install Ventoy onto the named USB device. DESTRUCTIVE.
 #   ./hydra.sh copy </dev/sdX>        Copy downloaded ISOs to the Ventoy partition.
+#   ./hydra.sh persistence </dev/sdX> Add a LUKS-encrypted Kali persistence file
+#                                      sized to the free space on the Ventoy partition.
+#                                      Prompts for the LUKS passphrase.
 #   ./hydra.sh test [/dev/sdX]        Boot a QEMU VM from the physical USB (or ISO dir).
 #   ./hydra.sh all </dev/sdX>         Run deps -> download -> usb -> copy -> test.
 #
@@ -55,6 +58,11 @@ KALI_ISO="kali-linux-${HYDRA_KALI_VERSION}-live-amd64.iso"
 KALI_TORRENT="${KALI_ISO}.torrent"
 KALI_TORRENT_URL="https://cdimage.kali.org/kali-${HYDRA_KALI_VERSION}/${KALI_TORRENT}"
 
+# Project URL — written to the Ventoy partition as a .url shortcut so anyone
+# who plugs the stick into a Windows host can double-click to land on the
+# project page. Override with HYDRA_REPO_URL=... if you fork.
+HYDRA_REPO_URL="${HYDRA_REPO_URL:-https://github.com/CryptoJones/Hydra}"
+
 # ---------- ui helpers ----------
 
 c_red()    { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -74,7 +82,7 @@ cmd_check() {
     echo "Kali version:      $HYDRA_KALI_VERSION"
     echo ""
     c_bold "--- required tools ---"
-    for t in wget curl tar aria2c lsblk parted sgdisk dd qemu-system-x86_64; do
+    for t in wget curl tar aria2c lsblk parted sgdisk dd cryptsetup qemu-system-x86_64; do
         if command -v "$t" >/dev/null 2>&1; then
             printf '  %-20s %s\n' "$t" "$(c_green ok)"
         else
@@ -105,13 +113,13 @@ cmd_deps() {
     # Detect package manager
     if command -v apt-get >/dev/null 2>&1; then
         sudo apt-get update -qq
-        sudo apt-get install -y aria2 qemu-system-x86 qemu-utils ovmf parted gdisk wget curl tar bats
+        sudo apt-get install -y aria2 qemu-system-x86 qemu-utils ovmf parted gdisk cryptsetup jq wget curl tar bats
     elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y aria2 qemu-system-x86 qemu-img edk2-ovmf parted gdisk wget curl tar bats
+        sudo dnf install -y aria2 qemu-system-x86 qemu-img edk2-ovmf parted gdisk cryptsetup jq wget curl tar bats
     elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -Sy --noconfirm aria2 qemu-base edk2-ovmf parted gptfdisk wget curl tar bats
+        sudo pacman -Sy --noconfirm aria2 qemu-base edk2-ovmf parted gptfdisk cryptsetup jq wget curl tar bats
     else
-        die "Unsupported package manager. Install: aria2 qemu-system-x86 ovmf parted gdisk manually."
+        die "Unsupported package manager. Install: aria2 qemu-system-x86 ovmf parted gdisk cryptsetup jq manually."
     fi
     c_green "Dependencies installed."
 }
@@ -218,6 +226,23 @@ find_ventoy_partition() {
     lsblk -ln -o NAME,LABEL "$dev" | awk '$2=="Ventoy"{print "/dev/"$1; exit}'
 }
 
+# Drop a Windows-style .url shortcut at the Ventoy partition root that
+# points at the Hydra project page. Plugged into Windows, the stick shows
+# a clickable "Hydra.url" — handy attribution + lets a recipient find the
+# upstream when they wonder where the stick came from. Idempotent.
+write_hydra_url_file() {
+    local mnt="$1"
+    local url_file="$mnt/Hydra.url"
+    if [[ -f "$url_file" ]]; then
+        c_green "  Hydra.url already present, skipping."
+        return 0
+    fi
+    # CRLF line endings so the .url renders correctly on Windows hosts.
+    printf '[InternetShortcut]\r\nURL=%s\r\n' "$HYDRA_REPO_URL" \
+        | sudo tee "$url_file" >/dev/null
+    c_green "  Wrote Hydra.url -> $HYDRA_REPO_URL"
+}
+
 cmd_copy() {
     local dev="${1:-}"
     [[ -b "$dev" ]] || die "Usage: ./hydra.sh copy /dev/sdX"
@@ -245,11 +270,138 @@ cmd_copy() {
         echo "  Copying $iso..."
         sudo cp --reflink=auto "$src" "$mnt/$iso"
     done
+    write_hydra_url_file "$mnt"
     sync
     sudo umount "$mnt"
     rmdir "$mnt"
     trap - EXIT
     c_green "ISOs copied. Eject safely with: sudo eject $dev"
+}
+
+cmd_persistence() {
+    local dev="${1:-}"
+    validate_usb_device "$dev"
+
+    command -v cryptsetup >/dev/null 2>&1 || die "cryptsetup missing — run: ./hydra.sh deps"
+    command -v jq >/dev/null 2>&1         || die "jq missing — run: ./hydra.sh deps"
+    command -v numfmt >/dev/null 2>&1     || die "numfmt missing (coreutils) — install coreutils."
+
+    local part
+    part=$(find_ventoy_partition "$dev")
+    [[ -n "$part" ]] || die "No Ventoy-labelled partition on $dev. Run: ./hydra.sh usb $dev first."
+
+    local dat_name="${HYDRA_PERSISTENCE_FILE:-persistence-kali.dat}"
+    local mapper_name="hydra-persistence-$$"
+
+    local mnt inner_mnt
+    mnt=$(mktemp -d -t hydra-persist-XXXX)
+    inner_mnt=$(mktemp -d -t hydra-persist-inner-XXXX)
+
+    # Single cleanup trap covers every exit path. close before unmount so
+    # the persistence file isn't held open by an orphaned mapper device.
+    cleanup() {
+        sudo umount "$inner_mnt" 2>/dev/null || true
+        sudo cryptsetup close "$mapper_name" 2>/dev/null || true
+        sudo umount "$mnt"       2>/dev/null || true
+        rmdir "$inner_mnt"       2>/dev/null || true
+        rmdir "$mnt"             2>/dev/null || true
+    }
+    trap cleanup EXIT INT TERM
+
+    sudo mount "$part" "$mnt"
+
+    local fs_type avail_bytes target_bytes
+    fs_type=$(findmnt -no FSTYPE "$mnt")
+    avail_bytes=$(df --output=avail -B1 "$mnt" | tail -n1 | tr -d ' ')
+
+    # Size: user-set override or "fill the partition minus a 50 MiB buffer
+    # so the FS metadata + sync slack has somewhere to live."
+    if [[ -n "${HYDRA_PERSISTENCE_SIZE:-}" ]]; then
+        target_bytes=$(numfmt --from=iec "$HYDRA_PERSISTENCE_SIZE" 2>/dev/null) \
+            || die "HYDRA_PERSISTENCE_SIZE '$HYDRA_PERSISTENCE_SIZE' is not a valid size (try '2G' / '500M')."
+    else
+        target_bytes=$(( avail_bytes - 50 * 1024 * 1024 ))
+    fi
+
+    (( target_bytes >= 256 * 1024 * 1024 )) \
+        || die "Less than 256 MiB available for persistence ($avail_bytes bytes free). Not creating a tiny persistence file."
+
+    # FAT32 caps any single file at 4 GiB - 1 byte. Older Ventoy versions
+    # default the data partition to FAT32; newer versions default to exFAT
+    # (no cap). Detect and refuse-to-exceed rather than fail mid-allocate.
+    if [[ "$fs_type" == "vfat" ]] && (( target_bytes > 4*1024*1024*1024 - 1 )); then
+        c_yellow "  Ventoy partition is FAT32 — capping persistence at 4 GiB - 1 byte."
+        target_bytes=$(( 4 * 1024 * 1024 * 1024 - 1 ))
+    fi
+
+    local target_path="$mnt/$dat_name"
+    if [[ -f "$target_path" ]]; then
+        die "$dat_name already exists on the Ventoy partition. Remove it first if you want to recreate."
+    fi
+
+    c_bold "=== Creating LUKS-encrypted Kali persistence ==="
+    echo "  Ventoy partition: $part ($fs_type)"
+    echo "  Persistence file: /$dat_name"
+    echo "  Size:             $(numfmt --to=iec --suffix=B "$target_bytes")"
+    echo ""
+
+    echo "  Allocating $dat_name..."
+    if ! sudo fallocate -l "$target_bytes" "$target_path" 2>/dev/null; then
+        # fallocate isn't supported on every filesystem (notably some
+        # FAT32 implementations). Fall back to dd; slower but universal.
+        local mib=$(( target_bytes / (1024*1024) ))
+        sudo dd if=/dev/zero of="$target_path" bs=1M count="$mib" status=progress conv=fsync
+    fi
+
+    c_bold "--- LUKS format ---"
+    echo "  You'll be prompted for a passphrase. This is what unlocks the"
+    echo "  encrypted persistence at Kali boot. There is NO recovery if you"
+    echo "  forget it — Hydra doesn't store the passphrase anywhere."
+    sudo cryptsetup luksFormat --type luks2 --batch-mode --verify-passphrase "$target_path"
+
+    c_bold "--- Opening LUKS, formatting ext4, writing persistence.conf ---"
+    sudo cryptsetup open "$target_path" "$mapper_name"
+    sudo mkfs.ext4 -q -L persistence "/dev/mapper/$mapper_name"
+    sudo mount "/dev/mapper/$mapper_name" "$inner_mnt"
+    # Kali's live-boot looks for the persistence label + a /persistence.conf
+    # whose first line is `/ union` (everything writable, overlay-style).
+    echo "/ union" | sudo tee "$inner_mnt/persistence.conf" >/dev/null
+    sudo umount "$inner_mnt"
+    sudo cryptsetup close "$mapper_name"
+
+    c_bold "--- Wiring up Ventoy persistence plugin (ventoy.json) ---"
+    sudo mkdir -p "$mnt/ventoy"
+    local cfg="$mnt/ventoy/ventoy.json"
+    local entry
+    entry=$(jq -nc \
+        --arg image "/$KALI_ISO" \
+        --arg backend "/$dat_name" \
+        '{image: $image, backend: $backend}')
+
+    if sudo test -f "$cfg"; then
+        # Merge: replace any existing persistence entry for this Kali ISO,
+        # leave other persistence entries (e.g. for Ubuntu) alone.
+        local merged
+        merged=$(sudo cat "$cfg" \
+            | jq --argjson new "$entry" '
+                .persistence = ((.persistence // []) | map(select(.image != $new.image)) + [$new])
+            ')
+        printf '%s\n' "$merged" | sudo tee "$cfg" >/dev/null
+    else
+        printf '{\n  "persistence": [%s]\n}\n' "$entry" | sudo tee "$cfg" >/dev/null
+    fi
+
+    write_hydra_url_file "$mnt"
+
+    sync
+    cleanup
+    trap - EXIT INT TERM
+
+    c_green "Encrypted Kali persistence ready on $dev."
+    echo ""
+    echo "At Kali's boot menu, pick the Live USB Encrypted Persistence entry"
+    echo "and enter the passphrase you just set. The persistence layer mounts"
+    echo "as / union — changes survive reboots."
 }
 
 cmd_test() {
@@ -303,13 +455,14 @@ main() {
     local sub="${1:-check}"
     shift || true
     case "$sub" in
-        check)    cmd_check    "$@" ;;
-        deps)     cmd_deps     "$@" ;;
-        download) cmd_download "$@" ;;
-        usb)      cmd_usb      "$@" ;;
-        copy)     cmd_copy     "$@" ;;
-        test)     cmd_test     "$@" ;;
-        all)      cmd_all      "$@" ;;
+        check)        cmd_check        "$@" ;;
+        deps)         cmd_deps         "$@" ;;
+        download)     cmd_download     "$@" ;;
+        usb)          cmd_usb          "$@" ;;
+        copy)         cmd_copy         "$@" ;;
+        persistence)  cmd_persistence  "$@" ;;
+        test)         cmd_test         "$@" ;;
+        all)          cmd_all          "$@" ;;
         -h|--help|help)
             sed -n '2,30p' "$0"
             ;;

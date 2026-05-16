@@ -46,6 +46,10 @@ chmod +x hydra.sh
 # Copy the ISOs to the Ventoy data partition
 ./hydra.sh copy /dev/sdX
 
+# Optional: add a LUKS-encrypted Kali persistence file that fills the
+# remaining free space. Prompts for the passphrase (no recovery if lost).
+./hydra.sh persistence /dev/sdX
+
 # Verify the stick boots — opens a QEMU window with your USB as the boot drive
 ./hydra.sh test /dev/sdX
 ```
@@ -70,6 +74,8 @@ mainstream and freely available.
 | **qemu-system-x86 / qemu-utils** | Boot-test step. `hydra test` launches a QEMU/KVM VM that boots from your physical USB stick. |
 | **ovmf / edk2-ovmf** | UEFI firmware for QEMU. Lets the VM emulate a modern UEFI machine instead of legacy BIOS. |
 | **parted / gdisk** | Used internally by Ventoy when partitioning the USB. |
+| **cryptsetup** | LUKS-encrypted Kali persistence (`./hydra.sh persistence`). |
+| **jq** | Persistence step writes/merges `ventoy/ventoy.json` via jq. |
 | **wget / curl / tar** | Fetch Ventoy + Ubuntu, extract the Ventoy archive. |
 
 If you can't (or don't want to) install dependencies via `./hydra.sh deps` —
@@ -90,6 +96,9 @@ All paths and versions are env-overridable. Defaults:
 | `HYDRA_KALI_VERSION` | `2026.1` | https://www.kali.org/get-kali/ |
 | `HYDRA_VM_MEMORY` | `4096` (MB) | QEMU RAM for boot test |
 | `HYDRA_VM_VCPUS` | `2` | QEMU vCPU count |
+| `HYDRA_PERSISTENCE_FILE` | `persistence-kali.dat` | Filename on the Ventoy partition |
+| `HYDRA_PERSISTENCE_SIZE` | unset (= fill free space) | Override with e.g. `2G`, `500M` |
+| `HYDRA_REPO_URL` | `https://github.com/CryptoJones/Hydra` | URL written to `Hydra.url` on the stick |
 
 Example:
 
@@ -111,6 +120,32 @@ script:
 5. Prompts you to type the device path again as confirmation before writing.
 
 Adding a USB? Run `./hydra.sh check` first to see your removable-disk candidates.
+
+---
+
+## Encrypted Kali persistence
+
+`./hydra.sh persistence /dev/sdX` adds a LUKS-encrypted persistence file
+to the Ventoy partition so changes you make in Kali Live survive reboots.
+
+What it does:
+
+1. Sizes a `persistence-kali.dat` file to fill the free space on the
+   Ventoy partition (override with `HYDRA_PERSISTENCE_SIZE=2G`).
+2. Runs `cryptsetup luksFormat` — you're prompted for a passphrase.
+   **There is no recovery if you forget it.**
+3. Opens the LUKS container, formats it as `ext4` labelled `persistence`,
+   writes `/persistence.conf` with `/ union`.
+4. Adds a persistence-plugin entry for the Kali ISO to
+   `ventoy/ventoy.json`.
+
+At Kali's boot menu, pick **Live USB Encrypted Persistence** and enter
+the passphrase. The persistence layer mounts as `/ union` — everything
+you change survives the next boot.
+
+The same step also drops a `Hydra.url` shortcut at the partition root
+pointing back at this repo, so anyone who plugs the stick into a
+Windows host has a single click back to the source.
 
 ---
 
