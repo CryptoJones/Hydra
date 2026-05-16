@@ -238,6 +238,30 @@ cmd_download() {
     ls -lh "$HYDRA_ISO_DIR" | grep -E '\.(iso|tar\.gz)$' || true
 }
 
+# Invoke Ventoy2Disk.sh with cwd set to its install directory. Critical
+# because Ventoy2Disk.sh captures `OLDDIR=$(pwd)` on its first line and
+# then prepends `$OLDDIR/tool/$TOOLDIR` to PATH. Launching from anywhere
+# else leaves Ventoy's bundled `mkexfatfs` / `vtoycli` binaries
+# unreachable, its internal tool-check fails, and the install bails out
+# with a generic "Some tools can not run" message — silently exiting 0
+# anyway, which our post-install probe is now hardened against (see
+# the previous PR) but is still ugly to hit.
+#
+# Wrapping the invocation in a subshell `( ... )` scopes the cwd change
+# so the caller's directory is untouched on return.
+#
+# Args:
+#   $1  installer_dir  — directory containing Ventoy2Disk.sh
+#   $2  ventoy_flag    — -i (install) or -I (force reinstall)
+#   $3  dev            — target block device, e.g. /dev/sda
+#
+# Pipes `yes` to satisfy Ventoy's interactive y/n prompts (it has no
+# non-interactive flag of its own).
+run_ventoy_installer() {
+    local installer_dir="$1" ventoy_flag="$2" dev="$3"
+    ( cd "$installer_dir" && yes | sudo ./Ventoy2Disk.sh "$ventoy_flag" "$dev" )
+}
+
 # Resolve the Ventoy installer path inside the extracted dir.
 # Auto-extracts if the tarball is present but the dir hasn't been unpacked yet
 # (common state when a prior session downloaded but the user jumped straight to
@@ -316,29 +340,14 @@ cmd_usb() {
     read -r confirm
     [[ "$confirm" == "$dev" ]] || die "Confirmation mismatch ($confirm != $dev). Aborting."
 
-    local installer
-    installer=$(ventoy_installer_path)
-    # Ventoy2Disk.sh has no "skip prompt" flag (an earlier version of this
-    # function used -y, which Ventoy treats as an invalid argument — it
-    # prints usage and exits 0, which our exit-code check silently rubber-
-    # stamped). The supported pattern is to pipe `y` answers in via stdin.
-    # `yes` repeats "y\n" indefinitely; Ventoy reads as many as it needs
-    # and then closes the pipe (yes exits cleanly on SIGPIPE).
     # -i = fresh install (refuses if Ventoy is already there).
     # -I = force reinstall over existing Ventoy.
     local ventoy_flag="-i"
     (( force )) && ventoy_flag="-I"
-    # CD into the Ventoy extracted dir BEFORE invoking the installer.
-    # Ventoy2Disk.sh captures `OLDDIR=$(pwd)` on its first line and then
-    # prepends `$OLDDIR/tool/$TOOLDIR` to PATH. If we launch it from
-    # anywhere other than the Ventoy install dir, that path doesn't exist
-    # and Ventoy's bundled `mkexfatfs` / `vtoycli` binaries can't be
-    # found by its internal tool-check (which falls through to whatever
-    # mkexfatfs ends up on the system PATH — and modern distros only ship
-    # mkfs.exfat, which exits 1 on `-V` and trips Ventoy's check). Running
-    # in the install dir keeps OLDDIR correct and Ventoy finds its own
-    # static binaries first.
-    ( cd "$VENTOY_EXTRACTED_DIR" && yes | sudo ./Ventoy2Disk.sh "$ventoy_flag" "$dev" )
+    # Confirm Ventoy is extracted before delegating (this helper also
+    # auto-extracts the tarball if needed).
+    ventoy_installer_path >/dev/null
+    run_ventoy_installer "$VENTOY_EXTRACTED_DIR" "$ventoy_flag" "$dev"
 
     # POST-INSTALL VERIFICATION. Ventoy2Disk.sh can exit 0 even when
     # critical tools (mkfs.exfat / mkexfatfs) were missing and the data

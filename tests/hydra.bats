@@ -261,6 +261,128 @@ teardown() {
     [[ "$output" != *"PATH: cat"* ]]
 }
 
+@test "run_ventoy_installer invokes Ventoy2Disk.sh with cwd = installer_dir" {
+    # Regression test for the bug where Ventoy2Disk.sh's `OLDDIR=$(pwd)`
+    # captured the caller's cwd (the Hydra repo dir) instead of the
+    # Ventoy install dir. PATH-prepend then pointed at a non-existent
+    # path and Ventoy couldn't find its bundled binaries.
+    source "$HYDRA"
+
+    local fake_install_dir="$BATS_TEST_TMPDIR/fake-ventoy"
+    mkdir -p "$fake_install_dir"
+    # Fake Ventoy2Disk.sh records the cwd it was invoked under, so the
+    # test can assert OLDDIR would have captured the right value.
+    cat > "$fake_install_dir/Ventoy2Disk.sh" <<'EOF'
+#!/usr/bin/env bash
+pwd > "$RECORDED_CWD_FILE"
+exit 0
+EOF
+    chmod +x "$fake_install_dir/Ventoy2Disk.sh"
+
+    # Stub sudo to exec the command without escalation (tests run unpriv).
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    export RECORDED_CWD_FILE="$BATS_TEST_TMPDIR/recorded-cwd"
+
+    run_ventoy_installer "$fake_install_dir" "-i" "/dev/null"
+
+    [ -f "$RECORDED_CWD_FILE" ]
+    # Use realpath on both sides — BATS_TEST_TMPDIR can include symlink
+    # components on some systems and pwd resolves them.
+    local recorded
+    recorded=$(realpath "$(cat "$RECORDED_CWD_FILE")")
+    local expected
+    expected=$(realpath "$fake_install_dir")
+    [ "$recorded" = "$expected" ]
+}
+
+@test "run_ventoy_installer does not leak cwd change to caller" {
+    # The subshell `( cd ... )` scoping is the load-bearing detail.
+    # If a future refactor accidentally drops the parens, hydra.sh's
+    # subsequent post-install probe would run from the Ventoy install
+    # dir instead of the operator's working directory.
+    source "$HYDRA"
+
+    local fake_install_dir="$BATS_TEST_TMPDIR/fake-ventoy-cwd"
+    mkdir -p "$fake_install_dir"
+    cat > "$fake_install_dir/Ventoy2Disk.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$fake_install_dir/Ventoy2Disk.sh"
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    local before_cwd
+    before_cwd=$(pwd)
+    run_ventoy_installer "$fake_install_dir" "-i" "/dev/null"
+    local after_cwd
+    after_cwd=$(pwd)
+    [ "$before_cwd" = "$after_cwd" ]
+}
+
+@test "run_ventoy_installer passes ventoy_flag + dev as positional args to the installer" {
+    # Catches a regression where the wrap accidentally drops/reorders args.
+    source "$HYDRA"
+
+    local fake_install_dir="$BATS_TEST_TMPDIR/fake-ventoy-args"
+    mkdir -p "$fake_install_dir"
+    cat > "$fake_install_dir/Ventoy2Disk.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$RECORDED_ARGS_FILE"
+exit 0
+EOF
+    chmod +x "$fake_install_dir/Ventoy2Disk.sh"
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    export RECORDED_ARGS_FILE="$BATS_TEST_TMPDIR/recorded-args"
+
+    run_ventoy_installer "$fake_install_dir" "-I" "/dev/loop42"
+
+    [ -f "$RECORDED_ARGS_FILE" ]
+    # Two args, in order: -I /dev/loop42
+    [ "$(sed -n 1p "$RECORDED_ARGS_FILE")" = "-I" ]
+    [ "$(sed -n 2p "$RECORDED_ARGS_FILE")" = "/dev/loop42" ]
+}
+
+@test "run_ventoy_installer pipes 'y' answers on stdin so Ventoy's prompts auto-confirm" {
+    source "$HYDRA"
+
+    local fake_install_dir="$BATS_TEST_TMPDIR/fake-ventoy-stdin"
+    mkdir -p "$fake_install_dir"
+    # Read the first line of stdin and record it.
+    cat > "$fake_install_dir/Ventoy2Disk.sh" <<'EOF'
+#!/usr/bin/env bash
+read -r line
+printf '%s\n' "$line" > "$RECORDED_STDIN_FILE"
+exit 0
+EOF
+    chmod +x "$fake_install_dir/Ventoy2Disk.sh"
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    export RECORDED_STDIN_FILE="$BATS_TEST_TMPDIR/recorded-stdin"
+
+    run_ventoy_installer "$fake_install_dir" "-i" "/dev/null"
+
+    [ -f "$RECORDED_STDIN_FILE" ]
+    [ "$(cat "$RECORDED_STDIN_FILE")" = "y" ]
+}
+
 @test "ensure_mkexfatfs_alias is a no-op when mkexfatfs already exists" {
     source "$HYDRA"
     # Stub mkexfatfs into PATH (already on STUB_DIR, which is at the front).
