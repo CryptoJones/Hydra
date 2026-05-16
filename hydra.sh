@@ -121,6 +121,29 @@ _all_required_tools() {
         | sort -u
 }
 
+# Ventoy 1.1.x's internal tooling calls `mkexfatfs` — the legacy binary
+# name shipped by the now-deprecated `exfat-utils` package. Modern distros
+# replaced that package with `exfatprogs`, which provides the same tool
+# under the new name `mkfs.exfat` and does NOT install the old name.
+#
+# Result: Ventoy silently fails to format the data partition with a
+# "mkexfatfs: command not found" warning, then exits 0 anyway. Our
+# post-install probe catches the bad-install state, but the operator
+# is left wondering what to do.
+#
+# This helper makes the workaround automatic: when `mkexfatfs` is missing
+# but `mkfs.exfat` is present, symlink the modern binary under the legacy
+# name in /usr/local/sbin (writable, on PATH, doesn't pollute distro dirs).
+# Idempotent: if the symlink is already in place, nothing changes.
+ensure_mkexfatfs_alias() {
+    command -v mkexfatfs >/dev/null 2>&1 && return 0
+    local mkfs_exfat
+    mkfs_exfat=$(command -v mkfs.exfat 2>/dev/null) || return 0
+    local link_path="/usr/local/sbin/mkexfatfs"
+    c_yellow "  mkexfatfs missing; symlinking $link_path -> $mkfs_exfat for Ventoy compatibility"
+    sudo ln -sf "$mkfs_exfat" "$link_path"
+}
+
 # ---------- subcommands ----------
 
 cmd_check() {
@@ -171,6 +194,9 @@ cmd_deps() {
     else
         die "Unsupported package manager. Install: aria2 qemu-system-x86 ovmf parted gdisk cryptsetup jq exfatprogs manually."
     fi
+    # Ventoy 1.1.x still calls mkexfatfs; modern exfatprogs only ships
+    # mkfs.exfat. Bridge the gap here so the next `hydra usb` doesn't fail.
+    ensure_mkexfatfs_alias
     c_green "Dependencies installed."
 }
 
@@ -274,6 +300,10 @@ cmd_usb() {
 
     preflight_tools "usb" "${HYDRA_TOOLS_USB[@]}"
     validate_usb_device "$dev"
+    # Runtime safety net: even if the operator skipped `./hydra.sh deps`,
+    # make sure Ventoy can find the legacy exFAT format binary before we
+    # commit to writing the stick.
+    ensure_mkexfatfs_alias
 
     c_bold "=== Hydra: Ventoy install onto $dev ==="
     lsblk "$dev" || true
