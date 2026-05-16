@@ -13,7 +13,9 @@
 #   ./hydra.sh check                  Show host readiness, USB candidates, ISO inventory.
 #   ./hydra.sh deps                   Install required tools (aria2, ventoy, qemu). Needs sudo.
 #   ./hydra.sh download               Download Ventoy + Ubuntu + Kali ISOs (idempotent).
-#   ./hydra.sh usb </dev/sdX>         Install Ventoy onto the named USB device. DESTRUCTIVE.
+#   ./hydra.sh usb </dev/sdX> [--force]
+#                                      Install Ventoy onto the named USB device. DESTRUCTIVE.
+#                                      --force reinstalls over an existing Ventoy stick.
 #   ./hydra.sh copy </dev/sdX>        Copy downloaded ISOs to the Ventoy partition.
 #   ./hydra.sh persistence </dev/sdX> [--kali SIZE] [--ubuntu SIZE]
 #                                      Add LUKS-encrypted persistence file(s) on the
@@ -257,13 +259,28 @@ validate_usb_device() {
 }
 
 cmd_usb() {
-    local dev="${1:-}"
+    local dev="" force=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force|-f)
+                force=1; shift ;;
+            -*)
+                die "Unknown flag: $1. Try './hydra.sh help'." ;;
+            *)
+                [[ -z "$dev" ]] || die "usb takes a single device argument (got '$dev' and '$1')."
+                dev="$1"; shift ;;
+        esac
+    done
+
     preflight_tools "usb" "${HYDRA_TOOLS_USB[@]}"
     validate_usb_device "$dev"
 
     c_bold "=== Hydra: Ventoy install onto $dev ==="
     lsblk "$dev" || true
     echo ""
+    if (( force )); then
+        c_yellow "--force: reinstalling Ventoy (any existing Ventoy install AND its data will be wiped)."
+    fi
     c_red "THIS WILL ERASE EVERYTHING ON $dev."
     echo -n "Type the device name to confirm (e.g. /dev/sdb): "
     read -r confirm
@@ -271,7 +288,14 @@ cmd_usb() {
 
     local installer
     installer=$(ventoy_installer_path)
-    sudo "$installer" -i "$dev"
+    # -i = fresh install (refuses if Ventoy is already there).
+    # -I = force reinstall over existing Ventoy (-y skips Ventoy's own y/n prompts;
+    #      our Hydra-side confirmation above already gates this).
+    if (( force )); then
+        sudo "$installer" -I -y "$dev"
+    else
+        sudo "$installer" -i "$dev"
+    fi
     c_green "Ventoy installed on $dev."
     echo ""
     echo "Next: ./hydra.sh copy $dev"

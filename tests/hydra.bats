@@ -65,6 +65,28 @@ teardown() {
     [[ "$output" == *"not a block device"* ]]
 }
 
+@test "usb rejects an unknown flag" {
+    run bash "$HYDRA" usb --frobnicate /dev/sda
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Unknown flag"* ]]
+    [[ "$output" == *"frobnicate"* ]]
+}
+
+@test "usb rejects two positional device args" {
+    run bash "$HYDRA" usb /dev/sda /dev/sdb
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"single device"* ]] || [[ "$output" == *"usb takes"* ]]
+}
+
+@test "usb --force is accepted in arg parsing" {
+    # --force followed by a non-existent device should fail at validate_usb_device,
+    # NOT at flag parsing. This proves --force is recognized.
+    run bash "$HYDRA" usb --force /dev/this-does-not-exist-XXX
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not a block device"* ]]
+    [[ "$output" != *"Unknown flag"* ]]
+}
+
 @test "usb refuses a regular file (not a block device)" {
     local f="$BATS_TEST_TMPDIR/not-a-device"
     touch "$f"
