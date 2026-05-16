@@ -328,7 +328,17 @@ cmd_usb() {
     # -I = force reinstall over existing Ventoy.
     local ventoy_flag="-i"
     (( force )) && ventoy_flag="-I"
-    yes | sudo "$installer" "$ventoy_flag" "$dev"
+    # CD into the Ventoy extracted dir BEFORE invoking the installer.
+    # Ventoy2Disk.sh captures `OLDDIR=$(pwd)` on its first line and then
+    # prepends `$OLDDIR/tool/$TOOLDIR` to PATH. If we launch it from
+    # anywhere other than the Ventoy install dir, that path doesn't exist
+    # and Ventoy's bundled `mkexfatfs` / `vtoycli` binaries can't be
+    # found by its internal tool-check (which falls through to whatever
+    # mkexfatfs ends up on the system PATH — and modern distros only ship
+    # mkfs.exfat, which exits 1 on `-V` and trips Ventoy's check). Running
+    # in the install dir keeps OLDDIR correct and Ventoy finds its own
+    # static binaries first.
+    ( cd "$VENTOY_EXTRACTED_DIR" && yes | sudo ./Ventoy2Disk.sh "$ventoy_flag" "$dev" )
 
     # POST-INSTALL VERIFICATION. Ventoy2Disk.sh can exit 0 even when
     # critical tools (mkfs.exfat / mkexfatfs) were missing and the data
