@@ -571,6 +571,179 @@ EOF
 
 # ---------- Sanity: shellcheck-style invariants ----------
 
+@test "update_ventoy_persistence_config creates ventoy.json when absent" {
+    # The persistence subcommand calls this after writing the LUKS-encrypted
+    # .dat file. First time on a clean Ventoy stick, ventoy.json doesn't
+    # exist yet — the helper must create it with a single persistence entry.
+    source "$HYDRA"
+
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    local mnt="$BATS_TEST_TMPDIR/ventoy-mnt"
+    mkdir -p "$mnt"
+
+    update_ventoy_persistence_config "$mnt" "kali-2026.1-live-amd64.iso" "persistence-kali.dat"
+
+    [ -f "$mnt/ventoy/ventoy.json" ]
+    local json
+    json=$(cat "$mnt/ventoy/ventoy.json")
+    # Single entry, image + backend land at the expected absolute-style paths.
+    [ "$(echo "$json" | jq '.persistence | length')" = "1" ]
+    [ "$(echo "$json" | jq -r '.persistence[0].image')" = "/kali-2026.1-live-amd64.iso" ]
+    [ "$(echo "$json" | jq -r '.persistence[0].backend')" = "/persistence-kali.dat" ]
+}
+
+@test "update_ventoy_persistence_config replaces existing entry for same image" {
+    # Re-running persistence on the same OS should overwrite the old entry,
+    # not duplicate it. Otherwise Ventoy would see two competing backends
+    # for the same ISO.
+    source "$HYDRA"
+
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    local mnt="$BATS_TEST_TMPDIR/ventoy-mnt"
+    mkdir -p "$mnt/ventoy"
+    cat > "$mnt/ventoy/ventoy.json" <<'EOF'
+{
+  "persistence": [
+    {"image": "/kali-2026.1-live-amd64.iso", "backend": "/old-persistence.dat"}
+  ]
+}
+EOF
+
+    update_ventoy_persistence_config "$mnt" "kali-2026.1-live-amd64.iso" "new-persistence.dat"
+
+    local json
+    json=$(cat "$mnt/ventoy/ventoy.json")
+    [ "$(echo "$json" | jq '.persistence | length')" = "1" ]
+    [ "$(echo "$json" | jq -r '.persistence[0].backend')" = "/new-persistence.dat" ]
+}
+
+@test "update_ventoy_persistence_config preserves entries for other images" {
+    # Adding Kali persistence on a stick that already has Ubuntu persistence
+    # must NOT drop the Ubuntu entry. Same shape for the reverse case.
+    source "$HYDRA"
+
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    local mnt="$BATS_TEST_TMPDIR/ventoy-mnt"
+    mkdir -p "$mnt/ventoy"
+    cat > "$mnt/ventoy/ventoy.json" <<'EOF'
+{
+  "persistence": [
+    {"image": "/ubuntu-26.04-desktop-amd64.iso", "backend": "/persistence-ubuntu.dat"}
+  ]
+}
+EOF
+
+    update_ventoy_persistence_config "$mnt" "kali-2026.1-live-amd64.iso" "persistence-kali.dat"
+
+    local json
+    json=$(cat "$mnt/ventoy/ventoy.json")
+    [ "$(echo "$json" | jq '.persistence | length')" = "2" ]
+    # Both entries present.
+    echo "$json" | jq -e '.persistence[] | select(.image == "/ubuntu-26.04-desktop-amd64.iso")' >/dev/null
+    echo "$json" | jq -e '.persistence[] | select(.image == "/kali-2026.1-live-amd64.iso")' >/dev/null
+}
+
+@test "find_ventoy_partition returns the partition matching the Ventoy label" {
+    # Stub lsblk + partprobe so the function runs without a real device.
+    source "$HYDRA"
+
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    cat > "$STUB_DIR/partprobe" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$STUB_DIR/partprobe"
+
+    cat > "$STUB_DIR/lsblk" <<'EOF'
+#!/usr/bin/env bash
+# Canned output mimicking a real Ventoy stick: two partitions,
+# data partition labelled "Ventoy", EFI labelled "VTOYEFI".
+cat <<'OUT'
+sda
+sda1 Ventoy
+sda2 VTOYEFI
+OUT
+EOF
+    chmod +x "$STUB_DIR/lsblk"
+
+    run find_ventoy_partition /dev/sda
+    [ "$status" -eq 0 ]
+    [ "$output" = "/dev/sda1" ]
+}
+
+@test "find_ventoy_partition returns empty when no Ventoy label exists" {
+    # Tells cmd_copy / cmd_persistence "this isn't a Ventoy stick yet,"
+    # which they translate into a "run ./hydra.sh usb first" error.
+    source "$HYDRA"
+
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    cat > "$STUB_DIR/partprobe" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$STUB_DIR/partprobe"
+
+    cat > "$STUB_DIR/lsblk" <<'EOF'
+#!/usr/bin/env bash
+# Stick still has only the manufacturer FAT32 partition labelled Lexar.
+cat <<'OUT'
+sda
+sda1 Lexar
+OUT
+EOF
+    chmod +x "$STUB_DIR/lsblk"
+
+    run find_ventoy_partition /dev/sda
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "cmd_check output lists every tool from the HYDRA_TOOLS_* arrays" {
+    # If a new subcommand adds a tool to its array, cmd_check must surface
+    # it in the inventory — otherwise an operator can't tell why a
+    # preflight failure happened. This test guarantees the inventory stays
+    # in sync with the union.
+    source "$HYDRA"
+
+    local expected
+    expected=$(_all_required_tools)
+    [ -n "$expected" ]
+
+    run bash "$HYDRA" check
+    [ "$status" -eq 0 ]
+    while IFS= read -r tool; do
+        [[ "$output" == *"$tool"* ]] || {
+            echo "FAIL: cmd_check output missing tool '$tool'" >&2
+            return 1
+        }
+    done <<<"$expected"
+}
+
 @test "hydra.sh has valid bash syntax" {
     run bash -n "$HYDRA"
     [ "$status" -eq 0 ]
