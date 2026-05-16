@@ -288,15 +288,30 @@ cmd_usb() {
 
     local installer
     installer=$(ventoy_installer_path)
+    # Ventoy2Disk.sh has no "skip prompt" flag (an earlier version of this
+    # function used -y, which Ventoy treats as an invalid argument — it
+    # prints usage and exits 0, which our exit-code check silently rubber-
+    # stamped). The supported pattern is to pipe `y` answers in via stdin.
+    # `yes` repeats "y\n" indefinitely; Ventoy reads as many as it needs
+    # and then closes the pipe (yes exits cleanly on SIGPIPE).
     # -i = fresh install (refuses if Ventoy is already there).
-    # -I = force reinstall over existing Ventoy (-y skips Ventoy's own y/n prompts;
-    #      our Hydra-side confirmation above already gates this).
-    if (( force )); then
-        sudo "$installer" -I -y "$dev"
-    else
-        sudo "$installer" -i "$dev"
+    # -I = force reinstall over existing Ventoy.
+    local ventoy_flag="-i"
+    (( force )) && ventoy_flag="-I"
+    yes | sudo "$installer" "$ventoy_flag" "$dev"
+
+    # POST-INSTALL VERIFICATION. Ventoy2Disk.sh can exit 0 even when
+    # critical tools (mkfs.exfat / mkexfatfs) were missing and the data
+    # partition wasn't created. Re-probe for the labelled partition; if
+    # it isn't there, the install failed regardless of Ventoy's exit code.
+    sudo partprobe "$dev" 2>/dev/null || true
+    sleep 2
+    local part
+    part=$(find_ventoy_partition "$dev")
+    if [[ -z "$part" ]]; then
+        die "Ventoy2Disk.sh exited 0 but no 'Ventoy'-labelled partition appeared on $dev. The install did NOT take. Check the Ventoy output above for missing tools (e.g. mkfs.exfat / mkexfatfs) and re-run after installing them."
     fi
-    c_green "Ventoy installed on $dev."
+    c_green "Ventoy installed on $dev (data partition: $part)."
     echo ""
     echo "Next: ./hydra.sh copy $dev"
 }
