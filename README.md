@@ -208,18 +208,94 @@ involved setup and requires the proprietary extension pack for some features.
 
 ## Testing
 
+### Unit tests (bats)
+
 ```bash
 sudo apt install bats   # (or dnf / pacman; also installed by ./hydra.sh deps)
 bats tests/
 ```
 
 The suite covers CLI dispatch, error paths on the destructive subcommands,
-URL constant substitution from `HYDRA_*_VERSION` env overrides, and the
-script-structure invariants (shebang, SPDX header, sourcing guard). No
-sudo, no real block devices, no network — safe to run on any host.
+URL constant substitution from `HYDRA_*_VERSION` env overrides, the
+`run_ventoy_installer` cwd / arg / stdin contract, the `mkexfatfs` alias
+helper, the `.url` writer, and the script-structure invariants (shebang,
+SPDX header, sourcing guard). No sudo, no real block devices, no
+network — safe to run on any host.
 
 See `tests/README.md` for the full inventory and how to add tests for new
 functionality.
+
+### Manual integration test (real USB + QEMU)
+
+End-to-end verification that the stick you just built actually boots.
+Run this after any non-trivial change to `cmd_usb`, `cmd_copy`, `cmd_persistence`,
+or the Ventoy version pin.
+
+**Prerequisites:** a 4–32 GB USB stick you don't mind wiping, plus a host
+with KVM (`/dev/kvm` accessible to your user — group `kvm` membership is
+the usual fix).
+
+**1. Build the stick.** Both subcommands need sudo; both write to the device.
+
+```bash
+# Wipe + reinstall Ventoy. The post-install probe will refuse to claim
+# success unless a Ventoy-labelled partition actually appears.
+./hydra.sh usb --force /dev/sdX
+
+# Copy Ubuntu + Kali ISOs to the Ventoy data partition. Also writes
+# Hydra.url to the partition root for Windows-host discoverability.
+./hydra.sh copy /dev/sdX
+```
+
+**2. (Optional) Add encrypted persistence.** Skip if you only want a
+fresh boot test.
+
+```bash
+./hydra.sh persistence /dev/sdX
+# Default: Kali absorbs the remaining free space, LUKS-encrypted.
+# Prompts twice for the passphrase. No recovery if you forget it.
+```
+
+**3. Install QEMU + UEFI firmware.** Only needed for the boot test;
+`./hydra.sh deps` covers it, or install manually for a lighter touch:
+
+```bash
+sudo apt install qemu-system-x86 qemu-utils ovmf
+```
+
+**4. Boot the stick in QEMU.**
+
+```bash
+./hydra.sh test /dev/sdX
+```
+
+A QEMU window opens with the physical USB as the boot drive. You should
+see Ventoy's menu listing Ubuntu + Kali. Pick either; verify it boots
+all the way to a desktop. Close the QEMU window when satisfied.
+
+**What "pass" looks like:**
+
+- [ ] `lsblk /dev/sdX` shows two partitions: a large `Ventoy`-labelled
+      one and a small `VTOYEFI` one.
+- [ ] `/dev/sdX1` mounted on the host shows `Hydra.url`,
+      `ubuntu-*.iso`, `kali-*.iso`, and (if persistence was added)
+      `persistence-kali.dat` + `ventoy/ventoy.json`.
+- [ ] QEMU boot reaches the Ventoy menu without complaint.
+- [ ] Picking Ubuntu boots to the GNOME desktop.
+- [ ] Picking Kali → **Live USB Encrypted Persistence** prompts for the
+      passphrase, then boots Kali with `/` writable. Create a file in
+      `/home/kali`, reboot via QEMU, re-enter the passphrase, confirm
+      the file is still there.
+
+**If any step fails:**
+
+- `usb` step prints "Some tools can not run" — re-run `./hydra.sh deps`
+  to refresh the `mkexfatfs` symlink, then retry.
+- `usb` claims success but `lsblk` shows only the manufacturer FAT32 —
+  the post-install probe should have caught this; if it didn't, file an
+  issue with the contents of `~/Downloads/iso/ventoy-1.1.12/log.txt`.
+- QEMU window is black for >30s with no menu — `dmesg` on the host
+  often points at a missing `ovmf` or KVM permission issue.
 
 ---
 
