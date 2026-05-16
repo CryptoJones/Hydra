@@ -571,6 +571,47 @@ EOF
 
 # ---------- Sanity: shellcheck-style invariants ----------
 
+@test "all subcommand accepts --skip-downloads flag and validates artifacts" {
+    # When --skip-downloads is set with an empty ISO dir, the script must
+    # bail with a clear "missing from ISO_DIR" error instead of charging
+    # ahead into cmd_usb / cmd_copy where the failure mode would be
+    # less obvious. Both --skip-deps and --skip-downloads are needed to
+    # skip past cmd_deps (which would otherwise prompt for sudo).
+    HYDRA_ISO_DIR="$BATS_TEST_TMPDIR/empty-iso-dir"
+    mkdir -p "$HYDRA_ISO_DIR"
+    export HYDRA_ISO_DIR
+    run bash "$HYDRA" all --skip-deps --skip-downloads /dev/sda
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--skip-downloads but missing from"* ]]
+    [[ "$output" == *"$HYDRA_ISO_DIR"* ]]
+}
+
+@test "all subcommand rejects unknown flag" {
+    run bash "$HYDRA" all --frobnicate /dev/sda
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Unknown flag"* ]]
+    [[ "$output" == *"frobnicate"* ]]
+}
+
+@test "all subcommand rejects two positional device args" {
+    run bash "$HYDRA" all /dev/sda /dev/sdb
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"single device"* ]] || [[ "$output" == *"all takes"* ]]
+}
+
+@test "all subcommand requires a device argument" {
+    run bash "$HYDRA" all
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Usage:"* ]]
+}
+
+@test "help output documents --skip-downloads + --skip-deps" {
+    run bash "$HYDRA" help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--skip-downloads"* ]]
+    [[ "$output" == *"--skip-deps"* ]]
+}
+
 @test "cmd_copy / cmd_persistence cleanup traps tolerate \$mnt being unbound (regression)" {
     # Regression: an EXIT trap that referenced `local mnt` could fire after the
     # function had returned (set -e during a mid-function sudo failure). With

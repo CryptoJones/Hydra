@@ -61,7 +61,10 @@ chmod +x hydra.sh
 Or, all in one shot:
 
 ```bash
-./hydra.sh all /dev/sdX
+./hydra.sh all /dev/sdX                       # full flow: deps -> download -> usb -> copy -> test
+./hydra.sh all /dev/sdX --skip-downloads      # ISOs already in place; skip the download step
+./hydra.sh all /dev/sdX --skip-deps           # deps already installed; skip apt/dnf/pacman
+./hydra.sh all /dev/sdX --skip-downloads --skip-deps   # straight to the destructive write
 ```
 
 ---
