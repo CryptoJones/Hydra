@@ -186,13 +186,13 @@ cmd_deps() {
     # Detect package manager
     if command -v apt-get >/dev/null 2>&1; then
         sudo apt-get update -qq
-        sudo apt-get install -y aria2 qemu-system-x86 qemu-utils ovmf parted gdisk cryptsetup jq exfatprogs wget curl tar bats
+        sudo apt-get install -y aria2 qemu-system-x86 qemu-utils ovmf parted gdisk cryptsetup jq exfatprogs pv wget curl tar bats
     elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y aria2 qemu-system-x86 qemu-img edk2-ovmf parted gdisk cryptsetup jq exfatprogs wget curl tar bats
+        sudo dnf install -y aria2 qemu-system-x86 qemu-img edk2-ovmf parted gdisk cryptsetup jq exfatprogs pv wget curl tar bats
     elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -Sy --noconfirm aria2 qemu-base edk2-ovmf parted gptfdisk cryptsetup jq exfatprogs wget curl tar bats
+        sudo pacman -Sy --noconfirm aria2 qemu-base edk2-ovmf parted gptfdisk cryptsetup jq exfatprogs pv wget curl tar bats
     else
-        die "Unsupported package manager. Install: aria2 qemu-system-x86 ovmf parted gdisk cryptsetup jq exfatprogs manually."
+        die "Unsupported package manager. Install: aria2 qemu-system-x86 ovmf parted gdisk cryptsetup jq exfatprogs pv manually."
     fi
     # Ventoy 1.1.x still calls mkexfatfs; modern exfatprogs only ships
     # mkfs.exfat. Bridge the gap here so the next `hydra usb` doesn't fail.
@@ -335,6 +335,11 @@ cmd_usb() {
     if (( force )); then
         c_yellow "--force: reinstalling Ventoy (any existing Ventoy install AND its data will be wiped)."
     fi
+    # "Now you know. And knowing is half the battle." — G.I. Joe (1985)
+    # Hydra's job before the destructive write is to make sure you know what
+    # you're about to wipe. lsblk above shows the contents; the line below
+    # makes the consequence unambiguous; the retype-the-device prompt that
+    # follows is the final gate.
     c_red "THIS WILL ERASE EVERYTHING ON $dev."
     echo -n "Type the device name to confirm (e.g. /dev/sdb): "
     read -r confirm
@@ -372,6 +377,39 @@ find_ventoy_partition() {
     sudo partprobe "$dev" 2>/dev/null || true
     sleep 1
     lsblk -ln -o NAME,LABEL "$dev" | awk '$2=="Ventoy"{print "/dev/"$1; exit}'
+}
+
+# Copy a (multi-GB) ISO to the Ventoy data partition with a live progress
+# bar when `pv` is on PATH; falls back to a silent `sudo cp` otherwise.
+#
+# Multi-GB writes over USB take minutes and the previous silent `cp` left
+# operators staring at a blinking cursor wondering if the script froze.
+# `pv` reads from the source (no sudo needed for that — the ISO lives in
+# the user's $HOME) and pipes to `sudo tee >/dev/null`, which writes to
+# the mounted partition. pv's progress meter goes to stderr, so we see
+# it even though stdout is piped.
+#
+# Args:
+#   $1  src  — source path (an ISO under $HYDRA_ISO_DIR)
+#   $2  dst  — destination path on the mounted Ventoy partition
+copy_iso_with_progress() {
+    local src="$1" dst="$2"
+    local iso_name
+    iso_name=$(basename "$src")
+    if command -v pv >/dev/null 2>&1; then
+        echo "  Copying $iso_name (with progress)..."
+        # Stop a spurious "broken pipe" exit from pv | tee killing the loop
+        # if tee errors out (set -o pipefail is on); the caller's trap
+        # handles cleanup either way.
+        pv --bytes --rate --eta --progress --timer "$src" \
+            | sudo tee "$dst" >/dev/null
+    else
+        # Fallback: silent cp with reflink-when-possible. Same shape as
+        # the original pre-pv path, kept for hosts that haven't installed
+        # pv via `./hydra.sh deps`.
+        echo "  Copying $iso_name (no pv on PATH — install via ./hydra.sh deps for progress)..."
+        sudo cp --reflink=auto "$src" "$dst"
+    fi
 }
 
 # Drop a Windows-style .url shortcut at the Ventoy partition root that
@@ -416,8 +454,7 @@ cmd_copy() {
             c_green "  $iso already on Ventoy, skipping."
             continue
         fi
-        echo "  Copying $iso..."
-        sudo cp --reflink=auto "$src" "$mnt/$iso"
+        copy_iso_with_progress "$src" "$mnt/$iso"
     done
     write_hydra_url_file "$mnt"
     sync

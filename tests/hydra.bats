@@ -571,6 +571,75 @@ EOF
 
 # ---------- Sanity: shellcheck-style invariants ----------
 
+@test "copy_iso_with_progress uses pv when present" {
+    # When pv is on PATH, the helper should print a "with progress" message
+    # and route the data through pv | sudo tee. We stub pv + sudo to
+    # capture the invocation shape without copying real bytes.
+    source "$HYDRA"
+
+    cat > "$STUB_DIR/pv" <<'EOF'
+#!/usr/bin/env bash
+echo "PV-CALLED $*" >> "$STUB_LOG"
+# Read & discard whatever the caller would have piped through.
+cat > /dev/null < "${@: -1}" 2>/dev/null || true
+EOF
+    chmod +x "$STUB_DIR/pv"
+
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+echo "SUDO-CALLED $*" >> "$STUB_LOG"
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    export STUB_LOG="$BATS_TEST_TMPDIR/stub.log"
+    local src="$BATS_TEST_TMPDIR/source.iso"
+    local dst="$BATS_TEST_TMPDIR/dest.iso"
+    printf 'fake iso payload' > "$src"
+
+    run copy_iso_with_progress "$src" "$dst"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"with progress"* ]]
+
+    # pv was invoked; sudo was invoked (for tee).
+    grep -q '^PV-CALLED' "$STUB_LOG"
+    grep -q '^SUDO-CALLED' "$STUB_LOG"
+}
+
+@test "copy_iso_with_progress falls back to cp when pv is missing" {
+    # pv intentionally absent — stub PATH only contains sudo. The helper
+    # must still complete via the cp fallback.
+    source "$HYDRA"
+
+    # Make sure pv is genuinely off PATH for this test.
+    PATH="$STUB_DIR"
+
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+echo "SUDO-CALLED $*" >> "$STUB_LOG"
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+    # Stub cp so we don't actually shell out to /usr/bin/cp via the
+    # stripped PATH (which would also fail to find cp).
+    cat > "$STUB_DIR/cp" <<'EOF'
+#!/usr/bin/env bash
+echo "CP-CALLED $*" >> "$STUB_LOG"
+exit 0
+EOF
+    chmod +x "$STUB_DIR/cp"
+
+    export STUB_LOG="$BATS_TEST_TMPDIR/stub.log"
+    local src="$BATS_TEST_TMPDIR/source.iso"
+    local dst="$BATS_TEST_TMPDIR/dest.iso"
+    printf 'fake iso payload' > "$src"
+
+    run copy_iso_with_progress "$src" "$dst"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"no pv on PATH"* ]]
+    grep -q '^CP-CALLED' "$STUB_LOG"
+}
+
 @test "update_ventoy_persistence_config creates ventoy.json when absent" {
     # The persistence subcommand calls this after writing the LUKS-encrypted
     # .dat file. First time on a clean Ventoy stick, ventoy.json doesn't
