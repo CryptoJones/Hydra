@@ -166,8 +166,18 @@ cmd_download() {
 }
 
 # Resolve the Ventoy installer path inside the extracted dir.
+# Auto-extracts if the tarball is present but the dir hasn't been unpacked yet
+# (common state when a prior session downloaded but the user jumped straight to
+# `usb` in a new session). Only dies if BOTH the dir and the tarball are missing.
 ventoy_installer_path() {
     local p="$VENTOY_EXTRACTED_DIR/Ventoy2Disk.sh"
+    if [[ ! -x "$p" ]]; then
+        local tarball="$HYDRA_ISO_DIR/$VENTOY_TARBALL"
+        if [[ -f "$tarball" ]]; then
+            echo "  Extracting $VENTOY_TARBALL..." >&2
+            tar -xzf "$tarball" -C "$HYDRA_ISO_DIR"
+        fi
+    fi
     [[ -x "$p" ]] || die "Ventoy not extracted at $VENTOY_EXTRACTED_DIR. Run: ./hydra.sh download"
     printf '%s' "$p"
 }

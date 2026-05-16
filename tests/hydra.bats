@@ -179,6 +179,24 @@ teardown() {
     [[ "$output" == *"Ventoy2Disk.sh" ]]
 }
 
+@test "ventoy_installer_path auto-extracts when tarball is present but dir is missing" {
+    source "$HYDRA"
+    # Stage a minimal Ventoy tarball: ventoy-${VERSION}/Ventoy2Disk.sh
+    local stage="$BATS_TEST_TMPDIR/stage"
+    mkdir -p "$stage/ventoy-${HYDRA_VENTOY_VERSION}"
+    echo '#!/bin/sh' > "$stage/ventoy-${HYDRA_VENTOY_VERSION}/Ventoy2Disk.sh"
+    chmod +x "$stage/ventoy-${HYDRA_VENTOY_VERSION}/Ventoy2Disk.sh"
+    tar -czf "$HYDRA_ISO_DIR/$VENTOY_TARBALL" -C "$stage" "ventoy-${HYDRA_VENTOY_VERSION}"
+    [ ! -d "$VENTOY_EXTRACTED_DIR" ]
+
+    run ventoy_installer_path
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Ventoy2Disk.sh" ]]
+    # Side-effect: the dir is now extracted.
+    [ -d "$VENTOY_EXTRACTED_DIR" ]
+    [ -x "$VENTOY_EXTRACTED_DIR/Ventoy2Disk.sh" ]
+}
+
 @test "validate_usb_device errors with no argument" {
     source "$HYDRA"
     run validate_usb_device ""
