@@ -46,9 +46,13 @@ chmod +x hydra.sh
 # Copy the ISOs to the Ventoy data partition
 ./hydra.sh copy /dev/sdX
 
-# Optional: add a LUKS-encrypted Kali persistence file that fills the
-# remaining free space. Prompts for the passphrase (no recovery if lost).
-./hydra.sh persistence /dev/sdX
+# Optional: add LUKS-encrypted persistence file(s). Default = Kali fills
+# the remaining free space. Pass --kali / --ubuntu to override per-OS.
+# Prompts for each passphrase (no recovery if lost).
+./hydra.sh persistence /dev/sdX                          # Kali, fill remaining
+./hydra.sh persistence /dev/sdX --kali 8G                # Kali fixed 8 GiB
+./hydra.sh persistence /dev/sdX --kali 8G --ubuntu max   # Kali fixed, Ubuntu absorbs rest
+./hydra.sh persistence /dev/sdX --kali 4G --ubuntu 4G    # Both fixed
 
 # Verify the stick boots — opens a QEMU window with your USB as the boot drive
 ./hydra.sh test /dev/sdX
@@ -96,8 +100,9 @@ All paths and versions are env-overridable. Defaults:
 | `HYDRA_KALI_VERSION` | `2026.1` | https://www.kali.org/get-kali/ |
 | `HYDRA_VM_MEMORY` | `4096` (MB) | QEMU RAM for boot test |
 | `HYDRA_VM_VCPUS` | `2` | QEMU vCPU count |
-| `HYDRA_PERSISTENCE_FILE` | `persistence-kali.dat` | Filename on the Ventoy partition |
-| `HYDRA_PERSISTENCE_SIZE` | unset (= fill free space) | Override with e.g. `2G`, `500M` |
+| `HYDRA_PERSISTENCE_KALI` | unset | Default for `--kali` (e.g. `2G`, `max`) |
+| `HYDRA_PERSISTENCE_UBUNTU` | unset | Default for `--ubuntu` (e.g. `2G`, `max`) |
+| `HYDRA_PERSISTENCE_SIZE` | (deprecated) | Back-compat alias for `HYDRA_PERSISTENCE_KALI` |
 | `HYDRA_REPO_URL` | `https://github.com/CryptoJones/Hydra` | URL written to `Hydra.url` on the stick |
 
 Example:
@@ -123,25 +128,54 @@ Adding a USB? Run `./hydra.sh check` first to see your removable-disk candidates
 
 ---
 
-## Encrypted Kali persistence
+## Encrypted persistence
 
-`./hydra.sh persistence /dev/sdX` adds a LUKS-encrypted persistence file
-to the Ventoy partition so changes you make in Kali Live survive reboots.
+`./hydra.sh persistence /dev/sdX` adds LUKS-encrypted persistence
+file(s) to the Ventoy partition so the changes you make in a Live
+session survive reboots.
 
-What it does:
+### Choosing the layout
 
-1. Sizes a `persistence-kali.dat` file to fill the free space on the
-   Ventoy partition (override with `HYDRA_PERSISTENCE_SIZE=2G`).
-2. Runs `cryptsetup luksFormat` — you're prompted for a passphrase.
+Each enabled OS gets its own `persistence-<os>.dat` file (separate LUKS
+volume, separate passphrase). Pick how to divide the free space:
+
+| Command | Layout |
+|---|---|
+| `./hydra.sh persistence /dev/sdX` | Kali absorbs all free space. Backwards-compatible default. |
+| `./hydra.sh persistence /dev/sdX --kali 8G` | Kali fixed at 8 GiB, the rest stays as free Ventoy space. |
+| `./hydra.sh persistence /dev/sdX --kali 8G --ubuntu max` | Kali fixed at 8 GiB, Ubuntu absorbs the remainder. |
+| `./hydra.sh persistence /dev/sdX --kali 4G --ubuntu 4G` | Two fixed 4 GiB images, anything left over is free Ventoy space. |
+| `./hydra.sh persistence /dev/sdX --ubuntu 6G` | Ubuntu only, no Kali persistence. |
+
+Size accepts iec values (`500M`, `2G`, `8G`, etc.) or the literal `max`.
+Only one OS can be `max` per run. Each image must be at least 256 MiB.
+
+Env vars `HYDRA_PERSISTENCE_KALI` / `HYDRA_PERSISTENCE_UBUNTU` set the
+defaults that flags override. The older `HYDRA_PERSISTENCE_SIZE` env var
+is honoured as a Kali-only alias for back-compat.
+
+### Under the hood
+
+For each enabled OS:
+
+1. Allocate a `persistence-<os>.dat` file at the requested size (FAT32
+   capped at 4 GiB - 1 byte; exFAT or newer Ventoy partitions don't cap).
+2. `cryptsetup luksFormat` (LUKS2) — prompts twice for the passphrase.
    **There is no recovery if you forget it.**
-3. Opens the LUKS container, formats it as `ext4` labelled `persistence`,
-   writes `/persistence.conf` with `/ union`.
-4. Adds a persistence-plugin entry for the Kali ISO to
-   `ventoy/ventoy.json`.
+3. Open the LUKS container, format ext4, label it for the OS that boots it:
+   - Kali: label `persistence`, conf file `/persistence.conf`
+   - Ubuntu: label `writable`, conf file `/writable.conf`
+4. Write `/ union` into the conf file, close LUKS.
+5. Add (or update) a per-ISO entry in `ventoy/ventoy.json`'s persistence
+   plugin pointing the ISO at the `.dat` backing file.
 
-At Kali's boot menu, pick **Live USB Encrypted Persistence** and enter
-the passphrase. The persistence layer mounts as `/ union` — everything
-you change survives the next boot.
+### Booting with persistence
+
+- **Kali**: at the boot menu, pick **Live USB Encrypted Persistence** and
+  enter the Kali passphrase.
+- **Ubuntu**: pick the persistent live entry. Note that Ubuntu's newer
+  Subiquity-based installer ISOs may not honour persistence in all
+  releases — test before relying on it.
 
 The same step also drops a `Hydra.url` shortcut at the partition root
 pointing back at this repo, so anyone who plugs the stick into a

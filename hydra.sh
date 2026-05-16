@@ -15,9 +15,13 @@
 #   ./hydra.sh download               Download Ventoy + Ubuntu + Kali ISOs (idempotent).
 #   ./hydra.sh usb </dev/sdX>         Install Ventoy onto the named USB device. DESTRUCTIVE.
 #   ./hydra.sh copy </dev/sdX>        Copy downloaded ISOs to the Ventoy partition.
-#   ./hydra.sh persistence </dev/sdX> Add a LUKS-encrypted Kali persistence file
-#                                      sized to the free space on the Ventoy partition.
-#                                      Prompts for the LUKS passphrase.
+#   ./hydra.sh persistence </dev/sdX> [--kali SIZE] [--ubuntu SIZE]
+#                                      Add LUKS-encrypted persistence file(s) on the
+#                                      Ventoy partition. SIZE accepts iec values like
+#                                      '2G' or '500M', or 'max' to consume the rest of
+#                                      the free space (one OS only). Default (no
+#                                      flags): Kali takes everything available.
+#                                      Each enabled OS prompts for its own passphrase.
 #   ./hydra.sh test [/dev/sdX]        Boot a QEMU VM from the physical USB (or ISO dir).
 #   ./hydra.sh all </dev/sdX>         Run deps -> download -> usb -> copy -> test.
 #
@@ -278,8 +282,161 @@ cmd_copy() {
     c_green "ISOs copied. Eject safely with: sudo eject $dev"
 }
 
+# Allocate + LUKS-format + ext4 + persistence.conf for one ISO target.
+#
+# Args (positional):
+#   $1  mount_point     — where the Ventoy partition is mounted
+#   $2  fs_type         — vfat / exfat / ntfs — used for FAT32 size cap
+#   $3  dat_name        — filename on the Ventoy partition (e.g. persistence-kali.dat)
+#   $4  ext4_label      — ext4 label that live-boot scans for (e.g. "persistence", "writable")
+#   $5  conf_name       — filename inside the persistence FS that live-boot reads (e.g. persistence.conf)
+#   $6  size_bytes      — file size to allocate in bytes (pre-validated, FAT32-capped)
+#   $7  display_name    — human label for the LUKS-prompt banner ("Kali" / "Ubuntu")
+#
+# Prompts for the LUKS passphrase interactively. No recovery if lost.
+create_encrypted_persistence_image() {
+    local mnt="$1" fs_type="$2" dat_name="$3" ext4_label="$4" conf_name="$5" size_bytes="$6" display="$7"
+    local target_path="$mnt/$dat_name"
+    local mapper_name="hydra-persist-$$-${ext4_label}"
+    local inner_mnt
+    inner_mnt=$(mktemp -d -t hydra-persist-inner-XXXX)
+
+    # Local cleanup specific to this image — caller's broader trap still
+    # owns the outer mount.
+    image_cleanup() {
+        sudo umount "$inner_mnt" 2>/dev/null || true
+        sudo cryptsetup close "$mapper_name" 2>/dev/null || true
+        rmdir "$inner_mnt" 2>/dev/null || true
+    }
+
+    if [[ -f "$target_path" ]]; then
+        image_cleanup
+        die "$dat_name already exists on the Ventoy partition. Remove it first to recreate."
+    fi
+
+    c_bold "=== Creating LUKS-encrypted $display persistence ==="
+    echo "  Persistence file: /$dat_name"
+    echo "  ext4 label:       $ext4_label"
+    echo "  Size:             $(numfmt --to=iec --suffix=B "$size_bytes")"
+    echo ""
+
+    echo "  Allocating $dat_name..."
+    if ! sudo fallocate -l "$size_bytes" "$target_path" 2>/dev/null; then
+        # fallocate isn't supported on some FAT32 implementations.
+        # Fall back to dd; slower but universal.
+        local mib=$(( size_bytes / (1024*1024) ))
+        sudo dd if=/dev/zero of="$target_path" bs=1M count="$mib" status=progress conv=fsync
+    fi
+
+    c_bold "--- LUKS format ($display) ---"
+    echo "  Passphrase prompt below. There is NO recovery if you forget it —"
+    echo "  Hydra doesn't store it anywhere."
+    if ! sudo cryptsetup luksFormat --type luks2 --batch-mode --verify-passphrase "$target_path"; then
+        image_cleanup
+        die "LUKS format failed for $display persistence."
+    fi
+
+    sudo cryptsetup open "$target_path" "$mapper_name" || { image_cleanup; die "luksOpen failed for $display"; }
+    sudo mkfs.ext4 -q -L "$ext4_label" "/dev/mapper/$mapper_name" || { image_cleanup; die "mkfs.ext4 failed for $display"; }
+    sudo mount "/dev/mapper/$mapper_name" "$inner_mnt" || { image_cleanup; die "mount of $display persistence FS failed"; }
+
+    # Both Kali (live-boot) and Ubuntu (casper newer than 22.04) read a
+    # single-line config file with `/ union` to mean "make / a writable
+    # union overlay." Same content, different filename.
+    echo "/ union" | sudo tee "$inner_mnt/$conf_name" >/dev/null
+
+    sudo umount "$inner_mnt"
+    sudo cryptsetup close "$mapper_name"
+    rmdir "$inner_mnt"
+}
+
+# Parse an explicit size spec or "max" against the remaining budget.
+# Echoes the resolved size in bytes (or "0" if size_spec is empty).
+# Errors out if max is requested but no budget remains.
+resolve_persistence_size() {
+    local size_spec="$1" remaining_bytes="$2" label="$3" fs_type="$4"
+    local bytes=0
+
+    if [[ -z "$size_spec" ]]; then
+        printf '0'
+        return 0
+    fi
+    if [[ "$size_spec" == "max" ]]; then
+        bytes="$remaining_bytes"
+    else
+        bytes=$(numfmt --from=iec "$size_spec" 2>/dev/null) \
+            || die "$label persistence size '$size_spec' is not valid. Try '2G', '500M', or 'max'."
+    fi
+
+    (( bytes >= 256 * 1024 * 1024 )) \
+        || die "$label persistence resolved to $(numfmt --to=iec --suffix=B "$bytes"); under the 256 MiB floor."
+
+    # FAT32 caps any single file at 4 GiB - 1 byte. Cap silently here so the
+    # caller's budget math accounts for the lost bytes (they go back to free).
+    if [[ "$fs_type" == "vfat" ]] && (( bytes > 4*1024*1024*1024 - 1 )); then
+        c_yellow "  Ventoy partition is FAT32 — capping $label persistence at 4 GiB - 1 byte." >&2
+        bytes=$(( 4 * 1024 * 1024 * 1024 - 1 ))
+    fi
+
+    printf '%s' "$bytes"
+}
+
+# Update ventoy/ventoy.json to attach a persistence file to an ISO.
+# Idempotent: replaces any existing entry for the same image.
+update_ventoy_persistence_config() {
+    local mnt="$1" iso_name="$2" dat_name="$3"
+    sudo mkdir -p "$mnt/ventoy"
+    local cfg="$mnt/ventoy/ventoy.json"
+    local entry
+    entry=$(jq -nc \
+        --arg image "/$iso_name" \
+        --arg backend "/$dat_name" \
+        '{image: $image, backend: $backend}')
+
+    if sudo test -f "$cfg"; then
+        local merged
+        merged=$(sudo cat "$cfg" \
+            | jq --argjson new "$entry" '
+                .persistence = ((.persistence // []) | map(select(.image != $new.image)) + [$new])
+            ')
+        printf '%s\n' "$merged" | sudo tee "$cfg" >/dev/null
+    else
+        printf '{\n  "persistence": [%s]\n}\n' "$entry" | sudo tee "$cfg" >/dev/null
+    fi
+}
+
 cmd_persistence() {
-    local dev="${1:-}"
+    local dev=""
+    local kali_size_arg="" ubuntu_size_arg=""
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --kali)
+                [[ -n "${2:-}" ]] || die "--kali requires a value (size like '2G', '500M', or 'max')."
+                kali_size_arg="$2"; shift 2 ;;
+            --ubuntu)
+                [[ -n "${2:-}" ]] || die "--ubuntu requires a value (size like '2G', '500M', or 'max')."
+                ubuntu_size_arg="$2"; shift 2 ;;
+            -*)
+                die "Unknown flag: $1. Try './hydra.sh help'." ;;
+            *)
+                [[ -z "$dev" ]] || die "persistence takes a single device argument (got '$dev' and '$1')."
+                dev="$1"; shift ;;
+        esac
+    done
+
+    # Env-var fallback. HYDRA_PERSISTENCE_SIZE / _FILE were the original
+    # single-image knobs; honour them as a back-compat default for Kali.
+    local kali_size="${kali_size_arg:-${HYDRA_PERSISTENCE_KALI:-${HYDRA_PERSISTENCE_SIZE:-}}}"
+    local ubuntu_size="${ubuntu_size_arg:-${HYDRA_PERSISTENCE_UBUNTU:-}}"
+    # If neither is set, fall back to original behavior: Kali takes everything.
+    if [[ -z "$kali_size" && -z "$ubuntu_size" ]]; then
+        kali_size="max"
+    fi
+    if [[ "$kali_size" == "max" && "$ubuntu_size" == "max" ]]; then
+        die "Both --kali and --ubuntu set to 'max' — only one can absorb the remaining space."
+    fi
+
     validate_usb_device "$dev"
 
     command -v cryptsetup >/dev/null 2>&1 || die "cryptsetup missing — run: ./hydra.sh deps"
@@ -290,105 +447,64 @@ cmd_persistence() {
     part=$(find_ventoy_partition "$dev")
     [[ -n "$part" ]] || die "No Ventoy-labelled partition on $dev. Run: ./hydra.sh usb $dev first."
 
-    local dat_name="${HYDRA_PERSISTENCE_FILE:-persistence-kali.dat}"
-    local mapper_name="hydra-persistence-$$"
-
-    local mnt inner_mnt
+    local mnt
     mnt=$(mktemp -d -t hydra-persist-XXXX)
-    inner_mnt=$(mktemp -d -t hydra-persist-inner-XXXX)
-
-    # Single cleanup trap covers every exit path. close before unmount so
-    # the persistence file isn't held open by an orphaned mapper device.
     cleanup() {
-        sudo umount "$inner_mnt" 2>/dev/null || true
-        sudo cryptsetup close "$mapper_name" 2>/dev/null || true
-        sudo umount "$mnt"       2>/dev/null || true
-        rmdir "$inner_mnt"       2>/dev/null || true
-        rmdir "$mnt"             2>/dev/null || true
+        sudo umount "$mnt" 2>/dev/null || true
+        rmdir "$mnt"       2>/dev/null || true
     }
     trap cleanup EXIT INT TERM
 
     sudo mount "$part" "$mnt"
 
-    local fs_type avail_bytes target_bytes
+    local fs_type avail_bytes
     fs_type=$(findmnt -no FSTYPE "$mnt")
     avail_bytes=$(df --output=avail -B1 "$mnt" | tail -n1 | tr -d ' ')
 
-    # Size: user-set override or "fill the partition minus a 50 MiB buffer
-    # so the FS metadata + sync slack has somewhere to live."
-    if [[ -n "${HYDRA_PERSISTENCE_SIZE:-}" ]]; then
-        target_bytes=$(numfmt --from=iec "$HYDRA_PERSISTENCE_SIZE" 2>/dev/null) \
-            || die "HYDRA_PERSISTENCE_SIZE '$HYDRA_PERSISTENCE_SIZE' is not a valid size (try '2G' / '500M')."
-    else
-        target_bytes=$(( avail_bytes - 50 * 1024 * 1024 ))
+    # Reserve a 50 MiB buffer for filesystem metadata / sync slack so a
+    # "fill the partition" allocation doesn't push the FS into "no space
+    # left on device" territory mid-write.
+    local budget=$(( avail_bytes - 50 * 1024 * 1024 ))
+    (( budget >= 256 * 1024 * 1024 )) \
+        || die "Only $(numfmt --to=iec --suffix=B "$avail_bytes") free on Ventoy partition; need at least 256 MiB after a 50 MiB buffer."
+
+    # Resolve explicit sizes first; "max" gets what's left after those.
+    local kali_bytes=0 ubuntu_bytes=0
+    if [[ -n "$kali_size" && "$kali_size" != "max" ]]; then
+        kali_bytes=$(resolve_persistence_size "$kali_size" "$budget" "Kali" "$fs_type")
+    fi
+    if [[ -n "$ubuntu_size" && "$ubuntu_size" != "max" ]]; then
+        ubuntu_bytes=$(resolve_persistence_size "$ubuntu_size" "$budget" "Ubuntu" "$fs_type")
     fi
 
-    (( target_bytes >= 256 * 1024 * 1024 )) \
-        || die "Less than 256 MiB available for persistence ($avail_bytes bytes free). Not creating a tiny persistence file."
+    local fixed=$(( kali_bytes + ubuntu_bytes ))
+    (( fixed <= budget )) \
+        || die "Explicit sizes total $(numfmt --to=iec --suffix=B "$fixed"), more than the available $(numfmt --to=iec --suffix=B "$budget")."
 
-    # FAT32 caps any single file at 4 GiB - 1 byte. Older Ventoy versions
-    # default the data partition to FAT32; newer versions default to exFAT
-    # (no cap). Detect and refuse-to-exceed rather than fail mid-allocate.
-    if [[ "$fs_type" == "vfat" ]] && (( target_bytes > 4*1024*1024*1024 - 1 )); then
-        c_yellow "  Ventoy partition is FAT32 — capping persistence at 4 GiB - 1 byte."
-        target_bytes=$(( 4 * 1024 * 1024 * 1024 - 1 ))
-    fi
+    local remaining=$(( budget - fixed ))
+    if [[ "$kali_size"   == "max" ]]; then kali_bytes=$(resolve_persistence_size   "max" "$remaining" "Kali"   "$fs_type"); fi
+    if [[ "$ubuntu_size" == "max" ]]; then ubuntu_bytes=$(resolve_persistence_size "max" "$remaining" "Ubuntu" "$fs_type"); fi
 
-    local target_path="$mnt/$dat_name"
-    if [[ -f "$target_path" ]]; then
-        die "$dat_name already exists on the Ventoy partition. Remove it first if you want to recreate."
-    fi
-
-    c_bold "=== Creating LUKS-encrypted Kali persistence ==="
+    c_bold "=== Hydra persistence plan ==="
     echo "  Ventoy partition: $part ($fs_type)"
-    echo "  Persistence file: /$dat_name"
-    echo "  Size:             $(numfmt --to=iec --suffix=B "$target_bytes")"
+    echo "  Free space:       $(numfmt --to=iec --suffix=B "$avail_bytes") (budget $(numfmt --to=iec --suffix=B "$budget") after 50 MiB buffer)"
+    [[ "$kali_bytes"   -gt 0 ]] && echo "  Kali:             $(numfmt --to=iec --suffix=B "$kali_bytes")  -> persistence-kali.dat"
+    [[ "$ubuntu_bytes" -gt 0 ]] && echo "  Ubuntu:           $(numfmt --to=iec --suffix=B "$ubuntu_bytes")  -> persistence-ubuntu.dat"
     echo ""
 
-    echo "  Allocating $dat_name..."
-    if ! sudo fallocate -l "$target_bytes" "$target_path" 2>/dev/null; then
-        # fallocate isn't supported on every filesystem (notably some
-        # FAT32 implementations). Fall back to dd; slower but universal.
-        local mib=$(( target_bytes / (1024*1024) ))
-        sudo dd if=/dev/zero of="$target_path" bs=1M count="$mib" status=progress conv=fsync
+    if (( kali_bytes > 0 )); then
+        create_encrypted_persistence_image "$mnt" "$fs_type" \
+            "persistence-kali.dat" "persistence" "persistence.conf" "$kali_bytes" "Kali"
+        update_ventoy_persistence_config "$mnt" "$KALI_ISO" "persistence-kali.dat"
     fi
 
-    c_bold "--- LUKS format ---"
-    echo "  You'll be prompted for a passphrase. This is what unlocks the"
-    echo "  encrypted persistence at Kali boot. There is NO recovery if you"
-    echo "  forget it — Hydra doesn't store the passphrase anywhere."
-    sudo cryptsetup luksFormat --type luks2 --batch-mode --verify-passphrase "$target_path"
-
-    c_bold "--- Opening LUKS, formatting ext4, writing persistence.conf ---"
-    sudo cryptsetup open "$target_path" "$mapper_name"
-    sudo mkfs.ext4 -q -L persistence "/dev/mapper/$mapper_name"
-    sudo mount "/dev/mapper/$mapper_name" "$inner_mnt"
-    # Kali's live-boot looks for the persistence label + a /persistence.conf
-    # whose first line is `/ union` (everything writable, overlay-style).
-    echo "/ union" | sudo tee "$inner_mnt/persistence.conf" >/dev/null
-    sudo umount "$inner_mnt"
-    sudo cryptsetup close "$mapper_name"
-
-    c_bold "--- Wiring up Ventoy persistence plugin (ventoy.json) ---"
-    sudo mkdir -p "$mnt/ventoy"
-    local cfg="$mnt/ventoy/ventoy.json"
-    local entry
-    entry=$(jq -nc \
-        --arg image "/$KALI_ISO" \
-        --arg backend "/$dat_name" \
-        '{image: $image, backend: $backend}')
-
-    if sudo test -f "$cfg"; then
-        # Merge: replace any existing persistence entry for this Kali ISO,
-        # leave other persistence entries (e.g. for Ubuntu) alone.
-        local merged
-        merged=$(sudo cat "$cfg" \
-            | jq --argjson new "$entry" '
-                .persistence = ((.persistence // []) | map(select(.image != $new.image)) + [$new])
-            ')
-        printf '%s\n' "$merged" | sudo tee "$cfg" >/dev/null
-    else
-        printf '{\n  "persistence": [%s]\n}\n' "$entry" | sudo tee "$cfg" >/dev/null
+    if (( ubuntu_bytes > 0 )); then
+        # Ubuntu Live (casper) since 22.04 reads a file labelled "writable"
+        # containing a /writable.conf with `/ union`. Older Ubuntu used
+        # "casper-rw" with no config file; "writable" is the modern shape.
+        create_encrypted_persistence_image "$mnt" "$fs_type" \
+            "persistence-ubuntu.dat" "writable" "writable.conf" "$ubuntu_bytes" "Ubuntu"
+        update_ventoy_persistence_config "$mnt" "$UBUNTU_ISO" "persistence-ubuntu.dat"
     fi
 
     write_hydra_url_file "$mnt"
@@ -397,11 +513,17 @@ cmd_persistence() {
     cleanup
     trap - EXIT INT TERM
 
-    c_green "Encrypted Kali persistence ready on $dev."
+    c_green "Encrypted persistence ready on $dev."
     echo ""
-    echo "At Kali's boot menu, pick the Live USB Encrypted Persistence entry"
-    echo "and enter the passphrase you just set. The persistence layer mounts"
-    echo "as / union — changes survive reboots."
+    if (( kali_bytes > 0 )); then
+        echo "Kali: at the boot menu, pick 'Live USB Encrypted Persistence' and"
+        echo "      enter your Kali passphrase. Mounts as / union."
+    fi
+    if (( ubuntu_bytes > 0 )); then
+        echo "Ubuntu: at the boot menu, pick the persistent live entry and enter"
+        echo "        your Ubuntu passphrase. Subiquity-installer ISOs may not"
+        echo "        honor persistence — test before relying on it."
+    fi
 }
 
 cmd_test() {

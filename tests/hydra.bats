@@ -111,6 +111,37 @@ teardown() {
     [[ "$output" == *"persistence"* ]]
 }
 
+@test "persistence --kali with no value exits with clear error" {
+    run bash "$HYDRA" persistence --kali
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--kali requires a value"* ]]
+}
+
+@test "persistence --ubuntu with no value exits with clear error" {
+    run bash "$HYDRA" persistence --ubuntu
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--ubuntu requires a value"* ]]
+}
+
+@test "persistence rejects an unknown flag" {
+    run bash "$HYDRA" persistence --frobnicate /dev/sda
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Unknown flag"* ]]
+    [[ "$output" == *"frobnicate"* ]]
+}
+
+@test "persistence rejects --kali max + --ubuntu max (can't both absorb remaining)" {
+    run bash "$HYDRA" persistence --kali max --ubuntu max /dev/sda
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"only one can absorb the remaining space"* ]]
+}
+
+@test "persistence rejects two positional device args" {
+    run bash "$HYDRA" persistence /dev/sda /dev/sdb
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"single device"* ]] || [[ "$output" == *"persistence takes"* ]]
+}
+
 # ---------- Function-level tests (source hydra.sh) ----------
 
 @test "URL constants pick up HYDRA_VENTOY_VERSION env override" {
@@ -195,6 +226,50 @@ EOF
     [ "$(awk '/\r$/{c++} END{print c}' "$mnt/Hydra.url")" = "2" ]
 
     rm -rf "$mnt"
+}
+
+@test "resolve_persistence_size: explicit '2G' resolves to 2 GiB in bytes" {
+    source "$HYDRA"
+    run resolve_persistence_size "2G" $((10*1024*1024*1024)) "Kali" "exfat"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$((2 * 1024 * 1024 * 1024))" ]
+}
+
+@test "resolve_persistence_size: 'max' returns the remaining budget" {
+    source "$HYDRA"
+    run resolve_persistence_size "max" $((3*1024*1024*1024)) "Kali" "exfat"
+    [ "$status" -eq 0 ]
+    [ "$output" = "$((3 * 1024 * 1024 * 1024))" ]
+}
+
+@test "resolve_persistence_size: empty spec returns 0" {
+    source "$HYDRA"
+    run resolve_persistence_size "" $((10*1024*1024*1024)) "Kali" "exfat"
+    [ "$status" -eq 0 ]
+    [ "$output" = "0" ]
+}
+
+@test "resolve_persistence_size: rejects garbage spec" {
+    source "$HYDRA"
+    run resolve_persistence_size "not-a-size" $((10*1024*1024*1024)) "Kali" "exfat"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not valid"* ]] || [[ "$output" == *"not-a-size"* ]]
+}
+
+@test "resolve_persistence_size: under 256 MiB floor dies" {
+    source "$HYDRA"
+    run resolve_persistence_size "100M" $((10*1024*1024*1024)) "Kali" "exfat"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"256 MiB floor"* ]] || [[ "$output" == *"256 MiB"* ]]
+}
+
+@test "resolve_persistence_size: FAT32 caps single file at 4 GiB - 1" {
+    source "$HYDRA"
+    # 10G requested on vfat: should silently cap at 4 GiB - 1 = 4294967295.
+    # The cap warning lands on stderr; capture only stdout for the value.
+    local out
+    out=$(resolve_persistence_size "10G" $((20*1024*1024*1024)) "Kali" "vfat" 2>/dev/null)
+    [ "$out" = "4294967295" ]
 }
 
 @test "write_hydra_url_file is idempotent when the file already exists" {
