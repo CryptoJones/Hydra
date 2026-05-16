@@ -67,6 +67,22 @@ KALI_TORRENT_URL="https://cdimage.kali.org/kali-${HYDRA_KALI_VERSION}/${KALI_TOR
 # project page. Override with HYDRA_REPO_URL=... if you fork.
 HYDRA_REPO_URL="${HYDRA_REPO_URL:-https://github.com/CryptoJones/Hydra}"
 
+# ---------- tool inventory ----------
+#
+# Every external binary the script invokes, grouped by the subcommand that
+# needs it. coreutils + grep / sed / awk / printf are assumed-present on any
+# Linux box and not enumerated.
+#
+# `cmd_check` displays the union of these so an operator can see at a glance
+# what's installed. Each `cmd_X` calls `preflight_tools` against its array
+# so it fails fast with a clear message before doing real work.
+
+HYDRA_TOOLS_DOWNLOAD=(wget curl tar aria2c)
+HYDRA_TOOLS_USB=(lsblk partprobe findmnt parted sgdisk dd mkfs.exfat sudo)
+HYDRA_TOOLS_COPY=(lsblk partprobe findmnt mount umount sudo)
+HYDRA_TOOLS_PERSISTENCE=(lsblk partprobe findmnt mount umount mkfs.ext4 cryptsetup jq numfmt fallocate dd df sudo)
+HYDRA_TOOLS_TEST=(qemu-system-x86_64 sudo)
+
 # ---------- ui helpers ----------
 
 c_red()    { printf '\033[31m%s\033[0m\n' "$*"; }
@@ -75,6 +91,33 @@ c_yellow() { printf '\033[33m%s\033[0m\n' "$*"; }
 c_bold()   { printf '\033[1m%s\033[0m\n' "$*"; }
 
 die() { c_red "ERROR: $*" >&2; exit 1; }
+
+# Verify every name in the array exists on $PATH. Dies with the missing
+# names + a pointer at `./hydra.sh deps` if any are missing. Tools are
+# tested via `command -v` so shell builtins (printf, etc.) wouldn't be
+# valid inputs — only real binaries.
+preflight_tools() {
+    local context="$1"; shift
+    local missing=()
+    for t in "$@"; do
+        command -v "$t" >/dev/null 2>&1 || missing+=("$t")
+    done
+    if (( ${#missing[@]} > 0 )); then
+        die "$context needs these tools, but they aren't on PATH: ${missing[*]}. Run: ./hydra.sh deps"
+    fi
+}
+
+# Sorted, de-duplicated union of all per-subcommand tool arrays. Used by
+# cmd_check to show one global inventory.
+_all_required_tools() {
+    printf '%s\n' \
+        "${HYDRA_TOOLS_DOWNLOAD[@]}" \
+        "${HYDRA_TOOLS_USB[@]}" \
+        "${HYDRA_TOOLS_COPY[@]}" \
+        "${HYDRA_TOOLS_PERSISTENCE[@]}" \
+        "${HYDRA_TOOLS_TEST[@]}" \
+        | sort -u
+}
 
 # ---------- subcommands ----------
 
@@ -86,13 +129,14 @@ cmd_check() {
     echo "Kali version:      $HYDRA_KALI_VERSION"
     echo ""
     c_bold "--- required tools ---"
-    for t in wget curl tar aria2c lsblk parted sgdisk dd cryptsetup qemu-system-x86_64; do
+    local t
+    while IFS= read -r t; do
         if command -v "$t" >/dev/null 2>&1; then
             printf '  %-20s %s\n' "$t" "$(c_green ok)"
         else
             printf '  %-20s %s\n' "$t" "$(c_yellow missing)"
         fi
-    done
+    done < <(_all_required_tools)
     echo ""
     c_bold "--- downloaded artifacts ---"
     mkdir -p "$HYDRA_ISO_DIR"
@@ -117,18 +161,19 @@ cmd_deps() {
     # Detect package manager
     if command -v apt-get >/dev/null 2>&1; then
         sudo apt-get update -qq
-        sudo apt-get install -y aria2 qemu-system-x86 qemu-utils ovmf parted gdisk cryptsetup jq wget curl tar bats
+        sudo apt-get install -y aria2 qemu-system-x86 qemu-utils ovmf parted gdisk cryptsetup jq exfatprogs wget curl tar bats
     elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y aria2 qemu-system-x86 qemu-img edk2-ovmf parted gdisk cryptsetup jq wget curl tar bats
+        sudo dnf install -y aria2 qemu-system-x86 qemu-img edk2-ovmf parted gdisk cryptsetup jq exfatprogs wget curl tar bats
     elif command -v pacman >/dev/null 2>&1; then
-        sudo pacman -Sy --noconfirm aria2 qemu-base edk2-ovmf parted gptfdisk cryptsetup jq wget curl tar bats
+        sudo pacman -Sy --noconfirm aria2 qemu-base edk2-ovmf parted gptfdisk cryptsetup jq exfatprogs wget curl tar bats
     else
-        die "Unsupported package manager. Install: aria2 qemu-system-x86 ovmf parted gdisk cryptsetup jq manually."
+        die "Unsupported package manager. Install: aria2 qemu-system-x86 ovmf parted gdisk cryptsetup jq exfatprogs manually."
     fi
     c_green "Dependencies installed."
 }
 
 cmd_download() {
+    preflight_tools "download" "${HYDRA_TOOLS_DOWNLOAD[@]}"
     mkdir -p "$HYDRA_ISO_DIR"
     cd "$HYDRA_ISO_DIR"
 
@@ -213,6 +258,7 @@ validate_usb_device() {
 
 cmd_usb() {
     local dev="${1:-}"
+    preflight_tools "usb" "${HYDRA_TOOLS_USB[@]}"
     validate_usb_device "$dev"
 
     c_bold "=== Hydra: Ventoy install onto $dev ==="
@@ -259,6 +305,7 @@ write_hydra_url_file() {
 
 cmd_copy() {
     local dev="${1:-}"
+    preflight_tools "copy" "${HYDRA_TOOLS_COPY[@]}"
     [[ -b "$dev" ]] || die "Usage: ./hydra.sh copy /dev/sdX"
 
     local part
@@ -448,10 +495,7 @@ cmd_persistence() {
     fi
 
     validate_usb_device "$dev"
-
-    command -v cryptsetup >/dev/null 2>&1 || die "cryptsetup missing — run: ./hydra.sh deps"
-    command -v jq >/dev/null 2>&1         || die "jq missing — run: ./hydra.sh deps"
-    command -v numfmt >/dev/null 2>&1     || die "numfmt missing (coreutils) — install coreutils."
+    preflight_tools "persistence" "${HYDRA_TOOLS_PERSISTENCE[@]}"
 
     local part
     part=$(find_ventoy_partition "$dev")
@@ -538,7 +582,7 @@ cmd_persistence() {
 
 cmd_test() {
     local target="${1:-}"
-    command -v qemu-system-x86_64 >/dev/null 2>&1 || die "qemu-system-x86_64 missing — run: ./hydra.sh deps"
+    preflight_tools "test" "${HYDRA_TOOLS_TEST[@]}"
     local ovmf_code
     for p in /usr/share/OVMF/OVMF_CODE.fd /usr/share/ovmf/x64/OVMF_CODE.fd /usr/share/qemu/ovmf-x86_64.bin; do
         if [[ -f "$p" ]]; then ovmf_code="$p"; break; fi

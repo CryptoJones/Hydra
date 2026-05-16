@@ -213,6 +213,51 @@ teardown() {
     [[ "$output" == *"not a block device"* ]]
 }
 
+@test "preflight_tools passes when every tool is present" {
+    source "$HYDRA"
+    # cat is universally on PATH; use it as the trivially-present stand-in.
+    run preflight_tools "fake-context" cat ls
+    [ "$status" -eq 0 ]
+}
+
+@test "preflight_tools dies with the missing tools listed in context" {
+    source "$HYDRA"
+    run preflight_tools "usb" hydra-fake-tool-A hydra-fake-tool-B
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"usb needs these tools"* ]]
+    [[ "$output" == *"hydra-fake-tool-A"* ]]
+    [[ "$output" == *"hydra-fake-tool-B"* ]]
+    [[ "$output" == *"./hydra.sh deps"* ]]
+}
+
+@test "preflight_tools reports only the missing ones, not the present ones" {
+    source "$HYDRA"
+    run preflight_tools "test-ctx" cat hydra-fake-tool ls
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"hydra-fake-tool"* ]]
+    # 'cat' and 'ls' both exist; should not be in the missing list.
+    [[ "$output" != *"PATH: cat"* ]]
+}
+
+@test "_all_required_tools is sorted, de-duplicated, and includes critical names" {
+    source "$HYDRA"
+    local out
+    out=$(_all_required_tools)
+    # Sample tools we know each subcommand needs.
+    grep -qx 'wget' <<<"$out"
+    grep -qx 'cryptsetup' <<<"$out"
+    grep -qx 'mkfs.ext4' <<<"$out"
+    grep -qx 'mkfs.exfat' <<<"$out"
+    grep -qx 'qemu-system-x86_64' <<<"$out"
+    # De-duplication: 'sudo' appears in multiple arrays, must appear once.
+    [ "$(grep -c '^sudo$' <<<"$out")" = "1" ]
+    # Sorted: 'aria2c' < 'wget'.
+    local first last
+    first=$(head -n1 <<<"$out")
+    last=$(tail -n1 <<<"$out")
+    [[ "$first" < "$last" ]] || [[ "$first" == "$last" ]]
+}
+
 @test "HYDRA_REPO_URL defaults to the CryptoJones Hydra URL" {
     source "$HYDRA"
     [[ "$HYDRA_REPO_URL" == "https://github.com/CryptoJones/Hydra" ]]
