@@ -438,9 +438,21 @@ cmd_copy() {
     part=$(find_ventoy_partition "$dev")
     [[ -n "$part" ]] || die "No Ventoy-labelled partition found on $dev. Run: ./hydra.sh usb $dev first."
 
+    # Prime sudo's credential cache up front so the multi-minute copy +
+    # url-write + unmount sequence doesn't get interrupted by a re-auth
+    # prompt the operator misses. The first sudo call below would prompt
+    # anyway; doing it explicitly here also makes the "operator needed"
+    # moment unambiguous in the output.
+    sudo -v || die "sudo authentication failed."
+
     local mnt
     mnt=$(mktemp -d -t hydra-ventoy-XXXX)
-    trap 'sudo umount "$mnt" 2>/dev/null; rmdir "$mnt" 2>/dev/null' EXIT
+    # IMPORTANT: trap body must tolerate `$mnt` being out of scope by the
+    # time the EXIT trap fires (e.g. if a later command tripped `set -e`
+    # and unwound the function stack before the trap ran). `${mnt:-}`
+    # under `set -u` returns empty instead of failing with "unbound
+    # variable", which would mask the real error.
+    trap '_m="${mnt:-}"; [[ -n "$_m" ]] && { sudo umount "$_m" 2>/dev/null; rmdir "$_m" 2>/dev/null; }' EXIT
     sudo mount "$part" "$mnt"
 
     c_bold "=== Copying ISOs to Ventoy partition ($part -> $mnt) ==="
@@ -626,11 +638,20 @@ cmd_persistence() {
     part=$(find_ventoy_partition "$dev")
     [[ -n "$part" ]] || die "No Ventoy-labelled partition on $dev. Run: ./hydra.sh usb $dev first."
 
+    # Prime sudo so the multi-minute LUKS-format + mkfs.ext4 + mount +
+    # ventoy.json-merge sequence isn't interrupted by a fresh password
+    # prompt the operator might miss.
+    sudo -v || die "sudo authentication failed."
+
     local mnt
     mnt=$(mktemp -d -t hydra-persist-XXXX)
+    # See cmd_copy for the rationale: trap body must tolerate `$mnt`
+    # being out of scope when the EXIT trap fires under `set -u`.
     cleanup() {
-        sudo umount "$mnt" 2>/dev/null || true
-        rmdir "$mnt"       2>/dev/null || true
+        local m="${mnt:-}"
+        [[ -n "$m" ]] || return 0
+        sudo umount "$m" 2>/dev/null || true
+        rmdir "$m"       2>/dev/null || true
     }
     trap cleanup EXIT INT TERM
 

@@ -571,6 +571,30 @@ EOF
 
 # ---------- Sanity: shellcheck-style invariants ----------
 
+@test "cmd_copy / cmd_persistence cleanup traps tolerate \$mnt being unbound (regression)" {
+    # Regression: an EXIT trap that referenced `local mnt` could fire after the
+    # function had returned (set -e during a mid-function sudo failure). With
+    # `set -u` in effect, `$mnt` was then unbound and the trap itself crashed
+    # with `mnt: unbound variable` — masking the real error. The fix is to
+    # write the trap with `${mnt:-}` defaulting so the cleanup either runs
+    # against the real path or no-ops when the local is gone.
+    #
+    # Simulate the post-function-return state by running both trap bodies
+    # in a fresh shell with `set -u` active and `mnt` never defined.
+
+    # cmd_copy's trap body (extracted verbatim from hydra.sh).
+    run bash -c 'set -u; _m="${mnt:-}"; [[ -n "$_m" ]] && { sudo umount "$_m" 2>/dev/null; rmdir "$_m" 2>/dev/null; }; echo OK'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+    [[ "$output" != *"unbound variable"* ]]
+
+    # cmd_persistence's cleanup() body shape.
+    run bash -c 'set -u; cleanup() { local m="${mnt:-}"; [[ -n "$m" ]] || return 0; sudo umount "$m" 2>/dev/null || true; rmdir "$m" 2>/dev/null || true; }; cleanup; echo OK'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+    [[ "$output" != *"unbound variable"* ]]
+}
+
 @test "copy_iso_with_progress uses pv when present" {
     # When pv is on PATH, the helper should print a "with progress" message
     # and route the data through pv | sudo tee. We stub pv + sudo to
