@@ -261,6 +261,72 @@ teardown() {
     [[ "$output" != *"PATH: cat"* ]]
 }
 
+@test "ensure_mkexfatfs_alias is a no-op when mkexfatfs already exists" {
+    source "$HYDRA"
+    # Stub mkexfatfs into PATH (already on STUB_DIR, which is at the front).
+    cat > "$STUB_DIR/mkexfatfs" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$STUB_DIR/mkexfatfs"
+
+    # sudo would prove we tried to symlink; stub it to record any call.
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+echo "SUDO-CALLED $*" >&2
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    run ensure_mkexfatfs_alias
+    [ "$status" -eq 0 ]
+    # No sudo invocation should have happened.
+    [[ "$output" != *"SUDO-CALLED"* ]]
+    [[ "$stderr" != *"SUDO-CALLED"* ]] || true  # bats merges streams by default
+}
+
+@test "ensure_mkexfatfs_alias does nothing when neither binary is present" {
+    source "$HYDRA"
+    # Wipe both names out of the test PATH by setting PATH to only the stub dir,
+    # which currently contains neither binary.
+    PATH="$STUB_DIR"
+
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+echo "SUDO-CALLED $*" >&2
+exit 0
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    run ensure_mkexfatfs_alias
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"SUDO-CALLED"* ]]
+}
+
+@test "ensure_mkexfatfs_alias symlinks when mkexfatfs missing but mkfs.exfat present" {
+    source "$HYDRA"
+    # mkfs.exfat is present; mkexfatfs is not.
+    cat > "$STUB_DIR/mkfs.exfat" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+    chmod +x "$STUB_DIR/mkfs.exfat"
+
+    # sudo stub: capture the ln invocation it would have run.
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+echo "SUDO: $*"
+exit 0
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    run ensure_mkexfatfs_alias
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"SUDO:"* ]]
+    [[ "$output" == *"ln -sf"* ]]
+    [[ "$output" == *"mkfs.exfat"* ]]
+    [[ "$output" == *"mkexfatfs"* ]]
+}
+
 @test "_all_required_tools is sorted, de-duplicated, and includes critical names" {
     source "$HYDRA"
     local out
