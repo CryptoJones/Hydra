@@ -732,8 +732,30 @@ cmd_persistence() {
 }
 
 cmd_test() {
-    local target="${1:-}"
+    local target="" writable_scratch=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --writable-scratch)
+                # Boot QEMU against a writable copy of the stick instead of
+                # the stick itself. Required to verify Ventoy persistence in
+                # QEMU — the default readonly mount path blocks Ventoy's
+                # initramfs persistence hook from running (see GitHub #19).
+                writable_scratch=1; shift ;;
+            -*)
+                die "Unknown flag: $1. Try './hydra.sh help'." ;;
+            *)
+                [[ -z "$target" ]] || die "test takes a single device argument (got '$target' and '$1')."
+                target="$1"; shift ;;
+        esac
+    done
+
     preflight_tools "test" "${HYDRA_TOOLS_TEST[@]}"
+
+    if [[ -z "$target" ]]; then
+        die "Usage: ./hydra.sh test /dev/sdX [--writable-scratch]   (boots the VM from your physical USB stick)"
+    fi
+    [[ -b "$target" ]] || die "$target is not a block device."
+
     local ovmf_code
     for p in /usr/share/OVMF/OVMF_CODE.fd /usr/share/ovmf/x64/OVMF_CODE.fd /usr/share/qemu/ovmf-x86_64.bin; do
         if [[ -f "$p" ]]; then ovmf_code="$p"; break; fi
@@ -751,19 +773,73 @@ cmd_test() {
     )
     [[ -n "${ovmf_code:-}" ]] && qemu_args+=(-bios "$ovmf_code")
 
-    if [[ -z "$target" ]]; then
-        die "Usage: ./hydra.sh test /dev/sdX   (boots the VM from your physical USB stick)"
+    if (( writable_scratch )); then
+        run_qemu_with_scratch "$target" "${qemu_args[@]}"
+    else
+        c_bold "=== Launching QEMU VM booting from $target (read-only) ==="
+        echo "RAM: ${HYDRA_VM_MEMORY}MB  vCPUs: ${HYDRA_VM_VCPUS}  GPU: virtio"
+        echo "Close the QEMU window to stop. Reading the USB requires sudo."
+        echo ""
+        # qemu needs read access to the raw device; running via sudo is the simplest path.
+        sudo qemu-system-x86_64 "${qemu_args[@]}" \
+            -drive "file=${target},format=raw,if=virtio,readonly=on"
     fi
-    [[ -b "$target" ]] || die "$target is not a block device."
+}
 
-    c_bold "=== Launching QEMU VM booting from $target ==="
-    echo "RAM: ${HYDRA_VM_MEMORY}MB  vCPUs: ${HYDRA_VM_VCPUS}  GPU: virtio"
-    echo "Close the QEMU window to stop. Reading the USB requires sudo."
+# Boot QEMU against a writable scratch copy of the stick. The real device
+# is read once into a temp image; QEMU mutates the image freely; the image
+# is deleted on exit. This is the only way to actually verify Ventoy's
+# persistence layer in QEMU (the default readonly path blocks the
+# initramfs hook that mounts persistence backends).
+#
+# Note: this requires ~15 GB of free space on the scratch dir for a typical
+# Ventoy USB. We default to /var/tmp (usually disk-backed) over /tmp
+# (often tmpfs) so we don't try to RAM-back a multi-GB image.
+run_qemu_with_scratch() {
+    local target="$1"; shift
+    local -a qemu_args=("$@")
+
+    local size_bytes
+    size_bytes=$(lsblk -dn -b -o SIZE "$target" 2>/dev/null | tr -d ' ')
+    local size_gb=$(( size_bytes / (1024*1024*1024) ))
+
+    local scratch_dir="${HYDRA_SCRATCH_DIR:-/var/tmp}"
+    [[ -d "$scratch_dir" && -w "$scratch_dir" ]] || \
+        die "scratch dir $scratch_dir not writable. Override with HYDRA_SCRATCH_DIR=/path."
+
+    # Verify free space on the scratch dir. We need at least 1.1× the stick
+    # size (1× for the copy + 10% headroom for any image growth + temp
+    # files). Using `df -B1 --output=avail` for byte-precision.
+    local avail_bytes
+    avail_bytes=$(df -B1 --output=avail "$scratch_dir" | tail -n1 | tr -d ' ')
+    local needed_bytes=$(( size_bytes * 11 / 10 ))
+    if (( avail_bytes < needed_bytes )); then
+        die "scratch dir $scratch_dir has $(numfmt --to=iec --suffix=B "$avail_bytes") free; need >= $(numfmt --to=iec --suffix=B "$needed_bytes") for a writable copy of $target ($(numfmt --to=iec --suffix=B "$size_bytes"))."
+    fi
+
+    local scratch
+    scratch=$(mktemp -p "$scratch_dir" --suffix=.img hydra-scratch-XXXX)
+    trap 'rm -f "$scratch" 2>/dev/null' EXIT INT TERM
+
+    c_bold "=== Launching QEMU VM booting from a WRITABLE SCRATCH copy of $target ==="
+    echo "Scratch dir:  $scratch_dir"
+    echo "Scratch file: $scratch"
+    echo "Stick size:   ${size_gb} GB — copy will take a couple minutes on USB 3.0."
+    echo "RAM:          ${HYDRA_VM_MEMORY}MB  vCPUs: ${HYDRA_VM_VCPUS}"
     echo ""
-
-    # qemu needs read access to the raw device; running via sudo is the simplest path.
-    sudo qemu-system-x86_64 "${qemu_args[@]}" \
-        -drive "file=${target},format=raw,if=virtio,readonly=on"
+    echo "The real stick at $target is NOT modified — all writes go to the scratch image"
+    echo "and are deleted when QEMU exits."
+    echo ""
+    echo "--- copying $target to scratch (sudo required to read raw device) ---"
+    sudo dd if="$target" of="$scratch" bs=64M status=progress conv=fsync
+    sudo chown "$(id -u):$(id -g)" "$scratch"  # so QEMU runs as your user can mutate it
+    echo ""
+    echo "--- launching QEMU ---"
+    qemu-system-x86_64 "${qemu_args[@]}" \
+        -drive "file=${scratch},format=raw,if=virtio"
+    echo "(QEMU window closed; deleting scratch image.)"
+    rm -f "$scratch"
+    trap - EXIT INT TERM
 }
 
 cmd_all() {
