@@ -25,7 +25,12 @@
 #                                      flags): Kali takes everything available.
 #                                      Each enabled OS prompts for its own passphrase.
 #   ./hydra.sh test [/dev/sdX]        Boot a QEMU VM from the physical USB (or ISO dir).
-#   ./hydra.sh all </dev/sdX>         Run deps -> download -> usb -> copy -> test.
+#   ./hydra.sh all </dev/sdX> [--skip-downloads] [--skip-deps]
+#                                      Run deps -> download -> usb -> copy -> test.
+#                                      --skip-downloads: ISOs + Ventoy tarball are
+#                                        already on disk; don't touch the network.
+#                                      --skip-deps: deps already installed; don't
+#                                        run apt/dnf/pacman.
 #
 # Env overrides:
 #   HYDRA_ISO_DIR              Where ISOs and Ventoy archive live (default ~/Downloads/iso)
@@ -762,10 +767,50 @@ cmd_test() {
 }
 
 cmd_all() {
-    local dev="${1:-}"
-    [[ -n "$dev" ]] || die "Usage: ./hydra.sh all /dev/sdX"
-    cmd_deps
-    cmd_download
+    local dev="" skip_downloads=0 skip_deps=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --skip-downloads)
+                # ISOs + Ventoy tarball already present on disk; don't even
+                # check the network. Useful for offline builds and for
+                # re-running `all` after a previous `download` step succeeded.
+                skip_downloads=1; shift ;;
+            --skip-deps)
+                # Counterpart for hosts where deps are already installed and
+                # the operator doesn't want sudo + apt update running.
+                skip_deps=1; shift ;;
+            -*)
+                die "Unknown flag: $1. Try './hydra.sh help'." ;;
+            *)
+                [[ -z "$dev" ]] || die "all takes a single device argument (got '$dev' and '$1')."
+                dev="$1"; shift ;;
+        esac
+    done
+    [[ -n "$dev" ]] || die "Usage: ./hydra.sh all /dev/sdX [--skip-downloads] [--skip-deps]"
+
+    if (( skip_deps )); then
+        c_yellow "--skip-deps: not running 'hydra deps'. (Assuming everything is installed.)"
+    else
+        cmd_deps
+    fi
+
+    if (( skip_downloads )); then
+        c_yellow "--skip-downloads: not downloading Ventoy / Ubuntu / Kali. (Assuming present in $HYDRA_ISO_DIR.)"
+        # Sanity check: refuse to continue if the artifacts the next steps
+        # rely on aren't actually there. Otherwise cmd_usb would hit a
+        # confusing "Ventoy not extracted" error from the tarball-not-found
+        # path, and cmd_copy would silently skip both ISOs.
+        local missing=()
+        [[ -f "$HYDRA_ISO_DIR/$VENTOY_TARBALL" ]] || missing+=("$VENTOY_TARBALL")
+        [[ -f "$HYDRA_ISO_DIR/$UBUNTU_ISO" ]] || missing+=("$UBUNTU_ISO")
+        [[ -f "$HYDRA_ISO_DIR/$KALI_ISO" ]] || missing+=("$KALI_ISO")
+        if (( ${#missing[@]} > 0 )); then
+            die "--skip-downloads but missing from $HYDRA_ISO_DIR: ${missing[*]}. Drop those files in place or run without --skip-downloads."
+        fi
+    else
+        cmd_download
+    fi
+
     cmd_usb "$dev"
     cmd_copy "$dev"
     cmd_test "$dev"
