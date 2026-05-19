@@ -20,6 +20,7 @@ steps:
           bats shellcheck
           parted gdisk exfatprogs
           qemu-system-x86 qemu-utils
-          jq numfmt
+          jq
+      # numfmt ships in coreutils (preinstalled), not a separate package.
       - shellcheck --severity=warning -e SC1091,SC2155 hydra.sh
       - bats tests/

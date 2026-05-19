@@ -29,7 +29,8 @@ jobs:
             bats shellcheck \
             parted gdisk exfatprogs \
             qemu-system-x86 qemu-utils \
-            jq numfmt
+            jq
+          # numfmt ships in coreutils (preinstalled), not a separate package.
 
       - name: Shellcheck (lint hydra.sh)
         # Disable a few warnings that don't add signal here:
