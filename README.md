@@ -48,8 +48,15 @@ chmod +x hydra.sh
 # check. (The rootfs guard and the type-the-device confirmation still fire.)
 ./hydra.sh usb /dev/sdX --allow-non-removable
 
-# Copy the ISOs to the Ventoy data partition
+# Want a GPT partition table instead of Ventoy's MBR default? (Recommended
+# for >2 TB drives and modern UEFI-only systems.)
+./hydra.sh usb /dev/sdX --gpt
+
+# Copy the ISOs to the Ventoy data partition.
+# Set HYDRA_WINDOWS_ISO to also drop a Windows installer ISO alongside
+# Ubuntu + Kali (Microsoft doesn't offer a stable direct URL, so BYO).
 ./hydra.sh copy /dev/sdX
+HYDRA_WINDOWS_ISO=~/Downloads/Win11_25H2_x64.iso ./hydra.sh copy /dev/sdX
 
 # Optional: add LUKS-encrypted persistence file(s). Default = Kali fills
 # the remaining free space. Pass --kali / --ubuntu to override per-OS.
@@ -112,12 +119,34 @@ All paths and versions are env-overridable. Defaults:
 | `HYDRA_PERSISTENCE_UBUNTU` | unset | Default for `--ubuntu` (e.g. `2G`, `max`) |
 | `HYDRA_PERSISTENCE_SIZE` | (deprecated) | Back-compat alias for `HYDRA_PERSISTENCE_KALI` |
 | `HYDRA_REPO_URL` | `https://github.com/CryptoJones/Hydra` | URL written to `Hydra.url` on the stick |
+| `HYDRA_WINDOWS_ISO` | unset | Absolute path to a Windows ISO. When set, `copy` drops it on the Ventoy partition alongside Ubuntu + Kali. |
 
 Example:
 
 ```bash
 HYDRA_UBUNTU_VERSION=24.04 HYDRA_VM_MEMORY=8192 ./hydra.sh all /dev/sdc
+HYDRA_WINDOWS_ISO=~/Downloads/Win11_25H2_x64.iso ./hydra.sh copy /dev/sdc
 ```
+
+---
+
+## Adding a Windows installer (BYO ISO)
+
+Microsoft does not publish a stable direct URL for Windows ISOs (the
+download page rotates short-lived links and gates them behind a JS-driven
+flow), so Hydra can't fetch one automatically. Instead, point
+`HYDRA_WINDOWS_ISO` at a local file you've already downloaded:
+
+```bash
+HYDRA_WINDOWS_ISO=/path/to/Win11_25H2_English_x64_v2.iso \
+  ./hydra.sh copy /dev/sdX
+```
+
+`copy` drops it onto the Ventoy partition under its original filename so
+Ventoy's menu lists it next to Ubuntu and Kali. `./hydra.sh check` shows
+whether the env var is set and the ISO is present. No persistence
+configuration is involved — Windows installers don't use Ventoy
+persistence.
 
 ---
 

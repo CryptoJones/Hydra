@@ -94,6 +94,22 @@ teardown() {
     [[ "$output" != *"Unknown flag"* ]]
 }
 
+@test "usb --gpt is accepted in arg parsing" {
+    run bash "$HYDRA" usb --gpt /dev/this-does-not-exist-XXX
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not a block device"* ]]
+    [[ "$output" != *"Unknown flag"* ]]
+}
+
+@test "all --gpt is accepted in arg parsing" {
+    # cmd_all runs cmd_deps first which calls sudo apt — that fails fast in
+    # the bats sandbox. The flag should still parse cleanly though; we check
+    # that it's not rejected as Unknown before any of the rest runs.
+    run bash "$HYDRA" all --gpt /dev/this-does-not-exist-XXX --skip-deps --skip-downloads
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"Unknown flag"* ]]
+}
+
 @test "validate_usb_device refuses non-removable device by default" {
     source "$HYDRA"
     # Use loop0 as a stand-in: it's a real block device on CI, never removable
@@ -172,6 +188,18 @@ teardown() {
     run bash "$HYDRA" help
     [ "$status" -eq 0 ]
     [[ "$output" == *"--allow-non-removable"* ]]
+}
+
+@test "help output documents --gpt" {
+    run bash "$HYDRA" help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--gpt"* ]]
+}
+
+@test "help output documents HYDRA_WINDOWS_ISO" {
+    run bash "$HYDRA" help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"HYDRA_WINDOWS_ISO"* ]]
 }
 
 @test "persistence with no device argument exits with clear error" {
@@ -421,6 +449,63 @@ EOF
     # Two args, in order: -I /dev/loop42
     [ "$(sed -n 1p "$RECORDED_ARGS_FILE")" = "-I" ]
     [ "$(sed -n 2p "$RECORDED_ARGS_FILE")" = "/dev/loop42" ]
+}
+
+@test "run_ventoy_installer with use_gpt=1 inserts -g before the device" {
+    source "$HYDRA"
+
+    local fake_install_dir="$BATS_TEST_TMPDIR/fake-ventoy-gpt"
+    mkdir -p "$fake_install_dir"
+    cat > "$fake_install_dir/Ventoy2Disk.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$RECORDED_ARGS_FILE"
+exit 0
+EOF
+    chmod +x "$fake_install_dir/Ventoy2Disk.sh"
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    export RECORDED_ARGS_FILE="$BATS_TEST_TMPDIR/recorded-args-gpt"
+
+    run_ventoy_installer "$fake_install_dir" "-i" "/dev/loop42" "1"
+
+    [ -f "$RECORDED_ARGS_FILE" ]
+    # Three args, in order: -i -g /dev/loop42
+    [ "$(sed -n 1p "$RECORDED_ARGS_FILE")" = "-i" ]
+    [ "$(sed -n 2p "$RECORDED_ARGS_FILE")" = "-g" ]
+    [ "$(sed -n 3p "$RECORDED_ARGS_FILE")" = "/dev/loop42" ]
+}
+
+@test "run_ventoy_installer with use_gpt=0 (default) omits -g" {
+    source "$HYDRA"
+
+    local fake_install_dir="$BATS_TEST_TMPDIR/fake-ventoy-mbr"
+    mkdir -p "$fake_install_dir"
+    cat > "$fake_install_dir/Ventoy2Disk.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$RECORDED_ARGS_FILE"
+exit 0
+EOF
+    chmod +x "$fake_install_dir/Ventoy2Disk.sh"
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    export RECORDED_ARGS_FILE="$BATS_TEST_TMPDIR/recorded-args-mbr"
+
+    # No fourth arg — use_gpt defaults to 0.
+    run_ventoy_installer "$fake_install_dir" "-i" "/dev/loop42"
+
+    [ -f "$RECORDED_ARGS_FILE" ]
+    [ "$(sed -n 1p "$RECORDED_ARGS_FILE")" = "-i" ]
+    [ "$(sed -n 2p "$RECORDED_ARGS_FILE")" = "/dev/loop42" ]
+    # And -g must not have been inserted.
+    ! grep -q '^-g$' "$RECORDED_ARGS_FILE"
 }
 
 @test "run_ventoy_installer pipes 'y' answers on stdin so Ventoy's prompts auto-confirm" {

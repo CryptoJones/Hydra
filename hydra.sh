@@ -13,14 +13,19 @@
 #   ./hydra.sh check                  Show host readiness, USB candidates, ISO inventory.
 #   ./hydra.sh deps                   Install required tools (aria2, ventoy, qemu). Needs sudo.
 #   ./hydra.sh download               Download Ventoy + Ubuntu + Kali ISOs (idempotent).
-#   ./hydra.sh usb </dev/sdX> [--force] [--allow-non-removable]
+#   ./hydra.sh usb </dev/sdX> [--force] [--allow-non-removable] [--gpt]
 #                                      Install Ventoy onto the named USB device. DESTRUCTIVE.
 #                                      --force reinstalls over an existing Ventoy stick.
 #                                      --allow-non-removable bypasses the kernel RM=1
 #                                        check — needed for USB-attached SSDs/NVMe
 #                                        enclosures, which present as non-removable
 #                                        even though they're hot-pluggable.
+#                                      --gpt installs with a GPT partition table
+#                                        instead of Ventoy's MBR default. Pick GPT
+#                                        for >2 TB drives or modern UEFI-only systems.
 #   ./hydra.sh copy </dev/sdX>        Copy downloaded ISOs to the Ventoy partition.
+#                                      Also copies the file named in
+#                                      HYDRA_WINDOWS_ISO (if set) — see env vars below.
 #   ./hydra.sh persistence </dev/sdX> [--kali SIZE] [--ubuntu SIZE]
 #                                      Add LUKS-encrypted persistence file(s) on the
 #                                      Ventoy partition. SIZE accepts iec values like
@@ -34,7 +39,7 @@
 #                                        image first; QEMU mutates the copy, the real
 #                                        stick is untouched. Required to verify
 #                                        Ventoy persistence in QEMU.
-#   ./hydra.sh all </dev/sdX> [--skip-downloads] [--skip-deps] [--allow-non-removable]
+#   ./hydra.sh all </dev/sdX> [--skip-downloads] [--skip-deps] [--allow-non-removable] [--gpt]
 #                                      Run deps -> download -> usb -> copy -> test.
 #                                      --skip-downloads: ISOs + Ventoy tarball are
 #                                        already on disk; don't touch the network.
@@ -42,6 +47,7 @@
 #                                        run apt/dnf/pacman.
 #                                      --allow-non-removable: forwarded to `usb`
 #                                        (see above).
+#                                      --gpt: forwarded to `usb` (see above).
 #
 # Env overrides:
 #   HYDRA_ISO_DIR              Where ISOs and Ventoy archive live (default ~/Downloads/iso)
@@ -52,6 +58,11 @@
 #   HYDRA_VM_VCPUS             QEMU vCPU count (default 2)
 #   HYDRA_SCRATCH_DIR          Where --writable-scratch writes its temp image
 #                              (default /var/tmp — disk-backed, multi-GB safe)
+#   HYDRA_WINDOWS_ISO          Absolute path to a Windows ISO (e.g. Win11_25H2_x64.iso).
+#                              When set, `copy` also drops this ISO onto the Ventoy
+#                              partition so Windows installers appear in the boot menu
+#                              alongside Ubuntu + Kali. Unset by default — Microsoft
+#                              doesn't offer a stable direct URL, so this is BYO.
 #
 # Safety:
 #   The `usb` and `all` subcommands write to a block device. The script
@@ -70,6 +81,10 @@ HYDRA_UBUNTU_VERSION="${HYDRA_UBUNTU_VERSION:-26.04}"
 HYDRA_KALI_VERSION="${HYDRA_KALI_VERSION:-2026.1}"
 HYDRA_VM_MEMORY="${HYDRA_VM_MEMORY:-4096}"
 HYDRA_VM_VCPUS="${HYDRA_VM_VCPUS:-2}"
+
+# Optional path to a Windows ISO. When set, cmd_copy drops it onto the
+# Ventoy partition alongside Ubuntu + Kali. Unset = no Windows entry.
+HYDRA_WINDOWS_ISO="${HYDRA_WINDOWS_ISO:-}"
 
 VENTOY_TARBALL="ventoy-${HYDRA_VENTOY_VERSION}-linux.tar.gz"
 VENTOY_URL="https://github.com/ventoy/Ventoy/releases/download/v${HYDRA_VENTOY_VERSION}/${VENTOY_TARBALL}"
@@ -190,6 +205,16 @@ cmd_check() {
             printf '  %-50s %s\n' "$f" "$(c_yellow missing)"
         fi
     done
+    if [[ -n "${HYDRA_WINDOWS_ISO:-}" ]]; then
+        if [[ -f "$HYDRA_WINDOWS_ISO" ]]; then
+            printf '  %-50s %s\n' "$(basename "$HYDRA_WINDOWS_ISO") (Windows)" \
+                "$(c_green "$(du -h "$HYDRA_WINDOWS_ISO" | cut -f1)")"
+        else
+            printf '  %-50s %s\n' "HYDRA_WINDOWS_ISO=$HYDRA_WINDOWS_ISO" "$(c_yellow "not found")"
+        fi
+    else
+        printf '  %-50s %s\n' "HYDRA_WINDOWS_ISO" "$(c_yellow "unset — no Windows entry")"
+    fi
     echo ""
     c_bold "--- removable block devices (USB candidates) ---"
     lsblk -dn -o NAME,SIZE,TYPE,RM,RO,MODEL,TRAN 2>/dev/null \
@@ -272,12 +297,17 @@ cmd_download() {
 #   $1  installer_dir  — directory containing Ventoy2Disk.sh
 #   $2  ventoy_flag    — -i (install) or -I (force reinstall)
 #   $3  dev            — target block device, e.g. /dev/sda
+#   $4  use_gpt        — optional, 1 to pass `-g` (GPT layout). Defaults to
+#                        empty/0 (MBR), matching Ventoy's own default.
 #
 # Pipes `yes` to satisfy Ventoy's interactive y/n prompts (it has no
 # non-interactive flag of its own).
 run_ventoy_installer() {
-    local installer_dir="$1" ventoy_flag="$2" dev="$3"
-    ( cd "$installer_dir" && yes | sudo ./Ventoy2Disk.sh "$ventoy_flag" "$dev" )
+    local installer_dir="$1" ventoy_flag="$2" dev="$3" use_gpt="${4:-0}"
+    local -a args=("$ventoy_flag")
+    (( use_gpt )) && args+=("-g")
+    args+=("$dev")
+    ( cd "$installer_dir" && yes | sudo ./Ventoy2Disk.sh "${args[@]}" )
 }
 
 # Resolve the Ventoy installer path inside the extracted dir.
@@ -336,13 +366,15 @@ validate_usb_device() {
 }
 
 cmd_usb() {
-    local dev="" force=0 allow_non_removable=0
+    local dev="" force=0 allow_non_removable=0 use_gpt=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --force|-f)
                 force=1; shift ;;
             --allow-non-removable)
                 allow_non_removable=1; shift ;;
+            --gpt)
+                use_gpt=1; shift ;;
             -*)
                 die "Unknown flag: $1. Try './hydra.sh help'." ;;
             *)
@@ -364,6 +396,9 @@ cmd_usb() {
     if (( force )); then
         c_yellow "--force: reinstalling Ventoy (any existing Ventoy install AND its data will be wiped)."
     fi
+    if (( use_gpt )); then
+        c_yellow "--gpt: writing GPT partition table (Ventoy default is MBR)."
+    fi
     # "Now you know. And knowing is half the battle." — G.I. Joe (1985)
     # Hydra's job before the destructive write is to make sure you know what
     # you're about to wipe. lsblk above shows the contents; the line below
@@ -381,7 +416,7 @@ cmd_usb() {
     # Confirm Ventoy is extracted before delegating (this helper also
     # auto-extracts the tarball if needed).
     ventoy_installer_path >/dev/null
-    run_ventoy_installer "$VENTOY_EXTRACTED_DIR" "$ventoy_flag" "$dev"
+    run_ventoy_installer "$VENTOY_EXTRACTED_DIR" "$ventoy_flag" "$dev" "$use_gpt"
 
     # POST-INSTALL VERIFICATION. Ventoy2Disk.sh can exit 0 even when
     # critical tools (mkfs.exfat / mkexfatfs) were missing and the data
@@ -498,6 +533,23 @@ cmd_copy() {
         fi
         copy_iso_with_progress "$src" "$mnt/$iso"
     done
+
+    # Optional BYO Windows ISO. Microsoft doesn't offer a stable direct URL,
+    # so this is a path-to-local-file env var rather than a download step.
+    if [[ -n "${HYDRA_WINDOWS_ISO:-}" ]]; then
+        if [[ ! -f "$HYDRA_WINDOWS_ISO" ]]; then
+            c_yellow "  HYDRA_WINDOWS_ISO=$HYDRA_WINDOWS_ISO not found — skipping."
+        else
+            local win_basename
+            win_basename=$(basename "$HYDRA_WINDOWS_ISO")
+            if [[ -f "$mnt/$win_basename" ]]; then
+                c_green "  $win_basename already on Ventoy, skipping."
+            else
+                copy_iso_with_progress "$HYDRA_WINDOWS_ISO" "$mnt/$win_basename"
+            fi
+        fi
+    fi
+
     write_hydra_url_file "$mnt"
     sync
     sudo umount "$mnt"
@@ -869,7 +921,7 @@ run_qemu_with_scratch() {
 }
 
 cmd_all() {
-    local dev="" skip_downloads=0 skip_deps=0 allow_non_removable=0
+    local dev="" skip_downloads=0 skip_deps=0 allow_non_removable=0 use_gpt=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --skip-downloads)
@@ -885,6 +937,9 @@ cmd_all() {
                 # Forwarded to cmd_usb. USB-attached SSD/NVMe enclosures
                 # report RM=0 even though the enclosure is hot-pluggable.
                 allow_non_removable=1; shift ;;
+            --gpt)
+                # Forwarded to cmd_usb. Switches Ventoy from MBR to GPT.
+                use_gpt=1; shift ;;
             -*)
                 die "Unknown flag: $1. Try './hydra.sh help'." ;;
             *)
@@ -892,7 +947,7 @@ cmd_all() {
                 dev="$1"; shift ;;
         esac
     done
-    [[ -n "$dev" ]] || die "Usage: ./hydra.sh all /dev/sdX [--skip-downloads] [--skip-deps] [--allow-non-removable]"
+    [[ -n "$dev" ]] || die "Usage: ./hydra.sh all /dev/sdX [--skip-downloads] [--skip-deps] [--allow-non-removable] [--gpt]"
 
     if (( skip_deps )); then
         c_yellow "--skip-deps: not running 'hydra deps'. (Assuming everything is installed.)"
@@ -919,6 +974,7 @@ cmd_all() {
 
     local -a usb_args=("$dev")
     (( allow_non_removable )) && usb_args+=("--allow-non-removable")
+    (( use_gpt ))             && usb_args+=("--gpt")
     cmd_usb "${usb_args[@]}"
     cmd_copy "$dev"
     cmd_test "$dev"

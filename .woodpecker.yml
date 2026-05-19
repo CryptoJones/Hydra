@@ -13,6 +13,14 @@ steps:
     image: ubuntu:24.04
     commands:
       - apt-get update -qq
-      - apt-get install -y --no-install-recommends bats shellcheck
+      # See .github/workflows/test.yml for why we install the extra USB/QEMU
+      # tools — bats tests invoke cmd_usb which runs preflight_tools before
+      # the arg-validation the tests assert on.
+      - apt-get install -y --no-install-recommends
+          bats shellcheck
+          parted gdisk exfatprogs
+          qemu-system-x86 qemu-utils
+          jq
+      # numfmt ships in coreutils (preinstalled), not a separate package.
       - shellcheck --severity=warning -e SC1091,SC2155 hydra.sh
       - bats tests/
