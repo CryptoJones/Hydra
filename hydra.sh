@@ -13,13 +13,16 @@
 #   ./hydra.sh check                  Show host readiness, USB candidates, ISO inventory.
 #   ./hydra.sh deps                   Install required tools (aria2, ventoy, qemu). Needs sudo.
 #   ./hydra.sh download               Download Ventoy + Ubuntu + Kali ISOs (idempotent).
-#   ./hydra.sh usb </dev/sdX> [--force] [--allow-non-removable]
+#   ./hydra.sh usb </dev/sdX> [--force] [--allow-non-removable] [--gpt]
 #                                      Install Ventoy onto the named USB device. DESTRUCTIVE.
 #                                      --force reinstalls over an existing Ventoy stick.
 #                                      --allow-non-removable bypasses the kernel RM=1
 #                                        check — needed for USB-attached SSDs/NVMe
 #                                        enclosures, which present as non-removable
 #                                        even though they're hot-pluggable.
+#                                      --gpt installs with a GPT partition table
+#                                        instead of Ventoy's MBR default. Pick GPT
+#                                        for >2 TB drives or modern UEFI-only systems.
 #   ./hydra.sh copy </dev/sdX>        Copy downloaded ISOs to the Ventoy partition.
 #   ./hydra.sh persistence </dev/sdX> [--kali SIZE] [--ubuntu SIZE]
 #                                      Add LUKS-encrypted persistence file(s) on the
@@ -34,7 +37,7 @@
 #                                        image first; QEMU mutates the copy, the real
 #                                        stick is untouched. Required to verify
 #                                        Ventoy persistence in QEMU.
-#   ./hydra.sh all </dev/sdX> [--skip-downloads] [--skip-deps] [--allow-non-removable]
+#   ./hydra.sh all </dev/sdX> [--skip-downloads] [--skip-deps] [--allow-non-removable] [--gpt]
 #                                      Run deps -> download -> usb -> copy -> test.
 #                                      --skip-downloads: ISOs + Ventoy tarball are
 #                                        already on disk; don't touch the network.
@@ -42,6 +45,7 @@
 #                                        run apt/dnf/pacman.
 #                                      --allow-non-removable: forwarded to `usb`
 #                                        (see above).
+#                                      --gpt: forwarded to `usb` (see above).
 #
 # Env overrides:
 #   HYDRA_ISO_DIR              Where ISOs and Ventoy archive live (default ~/Downloads/iso)
@@ -272,12 +276,17 @@ cmd_download() {
 #   $1  installer_dir  — directory containing Ventoy2Disk.sh
 #   $2  ventoy_flag    — -i (install) or -I (force reinstall)
 #   $3  dev            — target block device, e.g. /dev/sda
+#   $4  use_gpt        — optional, 1 to pass `-g` (GPT layout). Defaults to
+#                        empty/0 (MBR), matching Ventoy's own default.
 #
 # Pipes `yes` to satisfy Ventoy's interactive y/n prompts (it has no
 # non-interactive flag of its own).
 run_ventoy_installer() {
-    local installer_dir="$1" ventoy_flag="$2" dev="$3"
-    ( cd "$installer_dir" && yes | sudo ./Ventoy2Disk.sh "$ventoy_flag" "$dev" )
+    local installer_dir="$1" ventoy_flag="$2" dev="$3" use_gpt="${4:-0}"
+    local -a args=("$ventoy_flag")
+    (( use_gpt )) && args+=("-g")
+    args+=("$dev")
+    ( cd "$installer_dir" && yes | sudo ./Ventoy2Disk.sh "${args[@]}" )
 }
 
 # Resolve the Ventoy installer path inside the extracted dir.
@@ -336,13 +345,15 @@ validate_usb_device() {
 }
 
 cmd_usb() {
-    local dev="" force=0 allow_non_removable=0
+    local dev="" force=0 allow_non_removable=0 use_gpt=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --force|-f)
                 force=1; shift ;;
             --allow-non-removable)
                 allow_non_removable=1; shift ;;
+            --gpt)
+                use_gpt=1; shift ;;
             -*)
                 die "Unknown flag: $1. Try './hydra.sh help'." ;;
             *)
@@ -364,6 +375,9 @@ cmd_usb() {
     if (( force )); then
         c_yellow "--force: reinstalling Ventoy (any existing Ventoy install AND its data will be wiped)."
     fi
+    if (( use_gpt )); then
+        c_yellow "--gpt: writing GPT partition table (Ventoy default is MBR)."
+    fi
     # "Now you know. And knowing is half the battle." — G.I. Joe (1985)
     # Hydra's job before the destructive write is to make sure you know what
     # you're about to wipe. lsblk above shows the contents; the line below
@@ -381,7 +395,7 @@ cmd_usb() {
     # Confirm Ventoy is extracted before delegating (this helper also
     # auto-extracts the tarball if needed).
     ventoy_installer_path >/dev/null
-    run_ventoy_installer "$VENTOY_EXTRACTED_DIR" "$ventoy_flag" "$dev"
+    run_ventoy_installer "$VENTOY_EXTRACTED_DIR" "$ventoy_flag" "$dev" "$use_gpt"
 
     # POST-INSTALL VERIFICATION. Ventoy2Disk.sh can exit 0 even when
     # critical tools (mkfs.exfat / mkexfatfs) were missing and the data
@@ -869,7 +883,7 @@ run_qemu_with_scratch() {
 }
 
 cmd_all() {
-    local dev="" skip_downloads=0 skip_deps=0 allow_non_removable=0
+    local dev="" skip_downloads=0 skip_deps=0 allow_non_removable=0 use_gpt=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --skip-downloads)
@@ -885,6 +899,9 @@ cmd_all() {
                 # Forwarded to cmd_usb. USB-attached SSD/NVMe enclosures
                 # report RM=0 even though the enclosure is hot-pluggable.
                 allow_non_removable=1; shift ;;
+            --gpt)
+                # Forwarded to cmd_usb. Switches Ventoy from MBR to GPT.
+                use_gpt=1; shift ;;
             -*)
                 die "Unknown flag: $1. Try './hydra.sh help'." ;;
             *)
@@ -892,7 +909,7 @@ cmd_all() {
                 dev="$1"; shift ;;
         esac
     done
-    [[ -n "$dev" ]] || die "Usage: ./hydra.sh all /dev/sdX [--skip-downloads] [--skip-deps] [--allow-non-removable]"
+    [[ -n "$dev" ]] || die "Usage: ./hydra.sh all /dev/sdX [--skip-downloads] [--skip-deps] [--allow-non-removable] [--gpt]"
 
     if (( skip_deps )); then
         c_yellow "--skip-deps: not running 'hydra deps'. (Assuming everything is installed.)"
@@ -919,6 +936,7 @@ cmd_all() {
 
     local -a usb_args=("$dev")
     (( allow_non_removable )) && usb_args+=("--allow-non-removable")
+    (( use_gpt ))             && usb_args+=("--gpt")
     cmd_usb "${usb_args[@]}"
     cmd_copy "$dev"
     cmd_test "$dev"

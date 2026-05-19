@@ -48,6 +48,10 @@ chmod +x hydra.sh
 # check. (The rootfs guard and the type-the-device confirmation still fire.)
 ./hydra.sh usb /dev/sdX --allow-non-removable
 
+# Want a GPT partition table instead of Ventoy's MBR default? (Recommended
+# for >2 TB drives and modern UEFI-only systems.)
+./hydra.sh usb /dev/sdX --gpt
+
 # Copy the ISOs to the Ventoy data partition
 ./hydra.sh copy /dev/sdX
 
