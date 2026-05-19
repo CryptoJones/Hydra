@@ -24,6 +24,8 @@
 #                                        instead of Ventoy's MBR default. Pick GPT
 #                                        for >2 TB drives or modern UEFI-only systems.
 #   ./hydra.sh copy </dev/sdX>        Copy downloaded ISOs to the Ventoy partition.
+#                                      Also copies the file named in
+#                                      HYDRA_WINDOWS_ISO (if set) — see env vars below.
 #   ./hydra.sh persistence </dev/sdX> [--kali SIZE] [--ubuntu SIZE]
 #                                      Add LUKS-encrypted persistence file(s) on the
 #                                      Ventoy partition. SIZE accepts iec values like
@@ -56,6 +58,11 @@
 #   HYDRA_VM_VCPUS             QEMU vCPU count (default 2)
 #   HYDRA_SCRATCH_DIR          Where --writable-scratch writes its temp image
 #                              (default /var/tmp — disk-backed, multi-GB safe)
+#   HYDRA_WINDOWS_ISO          Absolute path to a Windows ISO (e.g. Win11_25H2_x64.iso).
+#                              When set, `copy` also drops this ISO onto the Ventoy
+#                              partition so Windows installers appear in the boot menu
+#                              alongside Ubuntu + Kali. Unset by default — Microsoft
+#                              doesn't offer a stable direct URL, so this is BYO.
 #
 # Safety:
 #   The `usb` and `all` subcommands write to a block device. The script
@@ -74,6 +81,10 @@ HYDRA_UBUNTU_VERSION="${HYDRA_UBUNTU_VERSION:-26.04}"
 HYDRA_KALI_VERSION="${HYDRA_KALI_VERSION:-2026.1}"
 HYDRA_VM_MEMORY="${HYDRA_VM_MEMORY:-4096}"
 HYDRA_VM_VCPUS="${HYDRA_VM_VCPUS:-2}"
+
+# Optional path to a Windows ISO. When set, cmd_copy drops it onto the
+# Ventoy partition alongside Ubuntu + Kali. Unset = no Windows entry.
+HYDRA_WINDOWS_ISO="${HYDRA_WINDOWS_ISO:-}"
 
 VENTOY_TARBALL="ventoy-${HYDRA_VENTOY_VERSION}-linux.tar.gz"
 VENTOY_URL="https://github.com/ventoy/Ventoy/releases/download/v${HYDRA_VENTOY_VERSION}/${VENTOY_TARBALL}"
@@ -194,6 +205,16 @@ cmd_check() {
             printf '  %-50s %s\n' "$f" "$(c_yellow missing)"
         fi
     done
+    if [[ -n "${HYDRA_WINDOWS_ISO:-}" ]]; then
+        if [[ -f "$HYDRA_WINDOWS_ISO" ]]; then
+            printf '  %-50s %s\n' "$(basename "$HYDRA_WINDOWS_ISO") (Windows)" \
+                "$(c_green "$(du -h "$HYDRA_WINDOWS_ISO" | cut -f1)")"
+        else
+            printf '  %-50s %s\n' "HYDRA_WINDOWS_ISO=$HYDRA_WINDOWS_ISO" "$(c_yellow "not found")"
+        fi
+    else
+        printf '  %-50s %s\n' "HYDRA_WINDOWS_ISO" "$(c_yellow "unset — no Windows entry")"
+    fi
     echo ""
     c_bold "--- removable block devices (USB candidates) ---"
     lsblk -dn -o NAME,SIZE,TYPE,RM,RO,MODEL,TRAN 2>/dev/null \
@@ -512,6 +533,23 @@ cmd_copy() {
         fi
         copy_iso_with_progress "$src" "$mnt/$iso"
     done
+
+    # Optional BYO Windows ISO. Microsoft doesn't offer a stable direct URL,
+    # so this is a path-to-local-file env var rather than a download step.
+    if [[ -n "${HYDRA_WINDOWS_ISO:-}" ]]; then
+        if [[ ! -f "$HYDRA_WINDOWS_ISO" ]]; then
+            c_yellow "  HYDRA_WINDOWS_ISO=$HYDRA_WINDOWS_ISO not found — skipping."
+        else
+            local win_basename
+            win_basename=$(basename "$HYDRA_WINDOWS_ISO")
+            if [[ -f "$mnt/$win_basename" ]]; then
+                c_green "  $win_basename already on Ventoy, skipping."
+            else
+                copy_iso_with_progress "$HYDRA_WINDOWS_ISO" "$mnt/$win_basename"
+            fi
+        fi
+    fi
+
     write_hydra_url_file "$mnt"
     sync
     sudo umount "$mnt"

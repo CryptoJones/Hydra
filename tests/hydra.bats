@@ -196,6 +196,12 @@ teardown() {
     [[ "$output" == *"--gpt"* ]]
 }
 
+@test "help output documents HYDRA_WINDOWS_ISO" {
+    run bash "$HYDRA" help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"HYDRA_WINDOWS_ISO"* ]]
+}
+
 @test "persistence with no device argument exits with clear error" {
     run bash "$HYDRA" persistence
     [ "$status" -ne 0 ]
