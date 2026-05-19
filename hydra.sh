@@ -13,9 +13,13 @@
 #   ./hydra.sh check                  Show host readiness, USB candidates, ISO inventory.
 #   ./hydra.sh deps                   Install required tools (aria2, ventoy, qemu). Needs sudo.
 #   ./hydra.sh download               Download Ventoy + Ubuntu + Kali ISOs (idempotent).
-#   ./hydra.sh usb </dev/sdX> [--force]
+#   ./hydra.sh usb </dev/sdX> [--force] [--allow-non-removable]
 #                                      Install Ventoy onto the named USB device. DESTRUCTIVE.
 #                                      --force reinstalls over an existing Ventoy stick.
+#                                      --allow-non-removable bypasses the kernel RM=1
+#                                        check — needed for USB-attached SSDs/NVMe
+#                                        enclosures, which present as non-removable
+#                                        even though they're hot-pluggable.
 #   ./hydra.sh copy </dev/sdX>        Copy downloaded ISOs to the Ventoy partition.
 #   ./hydra.sh persistence </dev/sdX> [--kali SIZE] [--ubuntu SIZE]
 #                                      Add LUKS-encrypted persistence file(s) on the
@@ -30,12 +34,14 @@
 #                                        image first; QEMU mutates the copy, the real
 #                                        stick is untouched. Required to verify
 #                                        Ventoy persistence in QEMU.
-#   ./hydra.sh all </dev/sdX> [--skip-downloads] [--skip-deps]
+#   ./hydra.sh all </dev/sdX> [--skip-downloads] [--skip-deps] [--allow-non-removable]
 #                                      Run deps -> download -> usb -> copy -> test.
 #                                      --skip-downloads: ISOs + Ventoy tarball are
 #                                        already on disk; don't touch the network.
 #                                      --skip-deps: deps already installed; don't
 #                                        run apt/dnf/pacman.
+#                                      --allow-non-removable: forwarded to `usb`
+#                                        (see above).
 #
 # Env overrides:
 #   HYDRA_ISO_DIR              Where ISOs and Ventoy archive live (default ~/Downloads/iso)
@@ -292,8 +298,11 @@ ventoy_installer_path() {
 }
 
 # Validate that the named device looks like a USB stick and is not the rootfs.
+# Pass allow_non_removable=1 to bypass the kernel RM=1 check — USB-attached
+# SSDs/NVMe enclosures report RM=0 even though the enclosure is hot-pluggable.
 validate_usb_device() {
     local dev="${1:-}"
+    local allow_non_removable="${2:-0}"
     [[ -n "$dev" ]] || die "no device specified. Usage: ./hydra.sh usb /dev/sdX"
     [[ -b "$dev" ]] || die "$dev is not a block device."
 
@@ -302,7 +311,13 @@ validate_usb_device() {
     rm=$(lsblk -dn -o RM "$dev" 2>/dev/null | tr -d ' ')
     size_bytes=$(lsblk -dn -b -o SIZE "$dev" 2>/dev/null | tr -d ' ')
 
-    [[ "$rm" == "1" ]] || die "$dev is not a removable device. Refusing to write."
+    if [[ "$rm" != "1" ]]; then
+        if (( allow_non_removable )); then
+            c_yellow "--allow-non-removable: $dev reports RM=0 but caller insists. Proceeding."
+        else
+            die "$dev is not a removable device. Refusing to write. (Pass --allow-non-removable if this is a USB-attached SSD/NVMe enclosure.)"
+        fi
+    fi
 
     # Sanity-check size: 4 GB minimum, 2 TB maximum (any larger is suspicious for USB).
     if (( size_bytes < 4*1024*1024*1024 )); then
@@ -321,11 +336,13 @@ validate_usb_device() {
 }
 
 cmd_usb() {
-    local dev="" force=0
+    local dev="" force=0 allow_non_removable=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --force|-f)
                 force=1; shift ;;
+            --allow-non-removable)
+                allow_non_removable=1; shift ;;
             -*)
                 die "Unknown flag: $1. Try './hydra.sh help'." ;;
             *)
@@ -335,7 +352,7 @@ cmd_usb() {
     done
 
     preflight_tools "usb" "${HYDRA_TOOLS_USB[@]}"
-    validate_usb_device "$dev"
+    validate_usb_device "$dev" "$allow_non_removable"
     # Runtime safety net: even if the operator skipped `./hydra.sh deps`,
     # make sure Ventoy can find the legacy exFAT format binary before we
     # commit to writing the stick.
@@ -852,7 +869,7 @@ run_qemu_with_scratch() {
 }
 
 cmd_all() {
-    local dev="" skip_downloads=0 skip_deps=0
+    local dev="" skip_downloads=0 skip_deps=0 allow_non_removable=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --skip-downloads)
@@ -864,6 +881,10 @@ cmd_all() {
                 # Counterpart for hosts where deps are already installed and
                 # the operator doesn't want sudo + apt update running.
                 skip_deps=1; shift ;;
+            --allow-non-removable)
+                # Forwarded to cmd_usb. USB-attached SSD/NVMe enclosures
+                # report RM=0 even though the enclosure is hot-pluggable.
+                allow_non_removable=1; shift ;;
             -*)
                 die "Unknown flag: $1. Try './hydra.sh help'." ;;
             *)
@@ -871,7 +892,7 @@ cmd_all() {
                 dev="$1"; shift ;;
         esac
     done
-    [[ -n "$dev" ]] || die "Usage: ./hydra.sh all /dev/sdX [--skip-downloads] [--skip-deps]"
+    [[ -n "$dev" ]] || die "Usage: ./hydra.sh all /dev/sdX [--skip-downloads] [--skip-deps] [--allow-non-removable]"
 
     if (( skip_deps )); then
         c_yellow "--skip-deps: not running 'hydra deps'. (Assuming everything is installed.)"
@@ -896,7 +917,9 @@ cmd_all() {
         cmd_download
     fi
 
-    cmd_usb "$dev"
+    local -a usb_args=("$dev")
+    (( allow_non_removable )) && usb_args+=("--allow-non-removable")
+    cmd_usb "${usb_args[@]}"
     cmd_copy "$dev"
     cmd_test "$dev"
 }
