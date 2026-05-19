@@ -247,7 +247,7 @@ cmd_download() {
     fi
 
     c_bold "--- final inventory ---"
-    ls -lh "$HYDRA_ISO_DIR" | grep -E '\.(iso|tar\.gz)$' || true
+    ls -lh "$HYDRA_ISO_DIR"/*.iso "$HYDRA_ISO_DIR"/*.tar.gz 2>/dev/null || true
 }
 
 # Invoke Ventoy2Disk.sh with cwd set to its install directory. Critical
@@ -464,6 +464,7 @@ cmd_copy() {
     # and unwound the function stack before the trap ran). `${mnt:-}`
     # under `set -u` returns empty instead of failing with "unbound
     # variable", which would mask the real error.
+    # shellcheck disable=SC2154  # _m is assigned inside the trap body string
     trap '_m="${mnt:-}"; [[ -n "$_m" ]] && { sudo umount "$_m" 2>/dev/null; rmdir "$_m" 2>/dev/null; }' EXIT
     sudo mount "$part" "$mnt"
 
@@ -768,6 +769,7 @@ cmd_test() {
         if [[ -f "$p" ]]; then ovmf_code="$p"; break; fi
     done
 
+    # shellcheck disable=SC2054  # commas in `type=q35,accel=kvm` are QEMU syntax, not array separators
     local -a qemu_args=(
         -enable-kvm
         -machine type=q35,accel=kvm
