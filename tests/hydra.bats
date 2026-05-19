@@ -87,6 +87,37 @@ teardown() {
     [[ "$output" != *"Unknown flag"* ]]
 }
 
+@test "usb --allow-non-removable is accepted in arg parsing" {
+    run bash "$HYDRA" usb --allow-non-removable /dev/this-does-not-exist-XXX
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not a block device"* ]]
+    [[ "$output" != *"Unknown flag"* ]]
+}
+
+@test "validate_usb_device refuses non-removable device by default" {
+    source "$HYDRA"
+    # Use loop0 as a stand-in: it's a real block device on CI, never removable
+    # (RM=0 for loop devices), and never the rootfs.
+    [[ -b /dev/loop0 ]] || skip "no /dev/loop0 on this host"
+    run validate_usb_device /dev/loop0
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not a removable device"* ]]
+    [[ "$output" == *"--allow-non-removable"* ]]
+}
+
+@test "validate_usb_device with allow_non_removable=1 bypasses RM check" {
+    source "$HYDRA"
+    [[ -b /dev/loop0 ]] || skip "no /dev/loop0 on this host"
+    # loop0 is non-removable AND under 4G (CI uses 4K loops) so the size
+    # check will fail next. That's fine — what we're asserting is that the
+    # RM=1 check did NOT fire (i.e. the failure is the size check, not the
+    # removability check). The yellow warning line still fires regardless.
+    run validate_usb_device /dev/loop0 1
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"not a removable device"* ]]
+    [[ "$output" == *"allow-non-removable"* ]]
+}
+
 @test "usb refuses a regular file (not a block device)" {
     local f="$BATS_TEST_TMPDIR/not-a-device"
     touch "$f"
@@ -135,6 +166,12 @@ teardown() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"--writable-scratch"* ]]
     [[ "$output" == *"HYDRA_SCRATCH_DIR"* ]]
+}
+
+@test "help output documents --allow-non-removable" {
+    run bash "$HYDRA" help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--allow-non-removable"* ]]
 }
 
 @test "persistence with no device argument exits with clear error" {

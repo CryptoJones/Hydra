@@ -43,6 +43,11 @@ chmod +x hydra.sh
 # The script refuses to write to non-removable or rootfs-backing devices.
 ./hydra.sh usb /dev/sdX
 
+# USB-attached SSD/NVMe enclosure? The kernel reports RM=0 even though the
+# enclosure is hot-pluggable. Pass --allow-non-removable to bypass that
+# check. (The rootfs guard and the type-the-device confirmation still fire.)
+./hydra.sh usb /dev/sdX --allow-non-removable
+
 # Copy the ISOs to the Ventoy data partition
 ./hydra.sh copy /dev/sdX
 
@@ -123,8 +128,11 @@ script:
 
 1. Refuses if the target isn't a block device.
 2. Refuses if the device's `RM` flag (removable) is 0 — i.e. internal disk.
+   Pass `--allow-non-removable` to bypass this for USB-attached SSD/NVMe
+   enclosures, which report `RM=0` even though they're hot-pluggable.
 3. Refuses if the device is smaller than 4 GB or larger than 2 TB.
 4. Refuses if the device backs the host root filesystem.
+   (This guard fires regardless of `--allow-non-removable`.)
 5. Prompts you to type the device path again as confirmation before writing.
 
 Adding a USB? Run `./hydra.sh check` first to see your removable-disk candidates.
