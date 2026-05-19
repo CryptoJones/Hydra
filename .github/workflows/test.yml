@@ -14,10 +14,22 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install bats and shellcheck
+      - name: Install bats, shellcheck, and the tools cmd_usb / cmd_test preflight against
+        # The arg-parser bats tests in tests/hydra.bats invoke the script
+        # via `bash hydra.sh usb ...`, which runs `preflight_tools` against
+        # HYDRA_TOOLS_USB before the arg-validation those tests assert on.
+        # Without parted/gdisk/exfatprogs/qemu installed, preflight dies
+        # first and the tests never observe the "not a block device" or
+        # "no device specified" output they're matching against. Install
+        # the relevant tools so the tests run against the code path they
+        # were written for.
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends bats shellcheck
+          sudo apt-get install -y --no-install-recommends \
+            bats shellcheck \
+            parted gdisk exfatprogs \
+            qemu-system-x86 qemu-utils \
+            jq numfmt
 
       - name: Shellcheck (lint hydra.sh)
         # Disable a few warnings that don't add signal here:
