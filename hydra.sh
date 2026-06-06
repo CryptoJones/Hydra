@@ -13,7 +13,7 @@
 #   ./hydra.sh check                  Show host readiness, USB candidates, ISO inventory.
 #   ./hydra.sh deps                   Install required tools (aria2, ventoy, qemu). Needs sudo.
 #   ./hydra.sh download               Download Ventoy + Ubuntu + Kali ISOs (idempotent).
-#   ./hydra.sh usb </dev/sdX> [--force] [--allow-non-removable] [--gpt]
+#   ./hydra.sh usb </dev/sdX> [--force] [--allow-non-removable] [--gpt] [--vault SIZE]
 #                                      Install Ventoy onto the named USB device. DESTRUCTIVE.
 #                                      --force reinstalls over an existing Ventoy stick.
 #                                      --allow-non-removable bypasses the kernel RM=1
@@ -23,6 +23,18 @@
 #                                      --gpt installs with a GPT partition table
 #                                        instead of Ventoy's MBR default. Pick GPT
 #                                        for >2 TB drives or modern UEFI-only systems.
+#                                      --vault SIZE reserves a tail of the drive (iec
+#                                        size like '16G' or '512M') and carves a
+#                                        standalone LUKS2-encrypted vault (ext4 inside)
+#                                        into it AFTER the Ventoy install. Implies
+#                                        --gpt. The vault is SEALED — you set the
+#                                        passphrase interactively, it's stored nowhere,
+#                                        and nothing auto-unlocks it on boot. This is a
+#                                        general-purpose encrypted partition, distinct
+#                                        from per-ISO `persistence` files. NOTE: the
+#                                        boot ISOs stay plaintext (Ventoy must read them
+#                                        to boot) — put sensitive data in the vault, not
+#                                        on the Ventoy partition.
 #   ./hydra.sh copy </dev/sdX> [--from <DIR|/dev/sdY>]
 #                                      Copy downloaded ISOs to the Ventoy partition.
 #                                      Also copies the file named in
@@ -310,13 +322,17 @@ cmd_download() {
 #   $3  dev            — target block device, e.g. /dev/sda
 #   $4  use_gpt        — optional, 1 to pass `-g` (GPT layout). Defaults to
 #                        empty/0 (MBR), matching Ventoy's own default.
+#   $5  reserve_mb     — optional MiB to leave UNALLOCATED at the end of the
+#                        disk via Ventoy's `-r`. 0/absent = no reserve. Used
+#                        by `usb --vault` to carve a LUKS tail afterward.
 #
 # Pipes `yes` to satisfy Ventoy's interactive y/n prompts (it has no
 # non-interactive flag of its own).
 run_ventoy_installer() {
-    local installer_dir="$1" ventoy_flag="$2" dev="$3" use_gpt="${4:-0}"
+    local installer_dir="$1" ventoy_flag="$2" dev="$3" use_gpt="${4:-0}" reserve_mb="${5:-0}"
     local -a args=("$ventoy_flag")
     (( use_gpt )) && args+=("-g")
+    (( reserve_mb > 0 )) && args+=("-r" "$reserve_mb")
     args+=("$dev")
     # `yes` feeds Ventoy's endless y/n prompts; when Ventoy exits first, `yes`
     # gets SIGPIPE (exit 141). With `pipefail` on (set at the top of this
@@ -381,8 +397,81 @@ validate_usb_device() {
     fi
 }
 
+# Resolve a vault SIZE spec (iec like '16G' / '512M') to whole MiB for
+# Ventoy's `-r` reserve flag. Dies on garbage; enforces a 256 MiB floor so
+# the LUKS2 header + a usable ext4 fit. Pure + unit-tested.
+vault_reserve_mib() {
+    local size_spec="$1"
+    local bytes
+    bytes=$(numfmt --from=iec "$size_spec" 2>/dev/null) \
+        || die "vault size '$size_spec' is not valid. Try '16G', '512M', or '2G'."
+    (( bytes >= 256 * 1024 * 1024 )) \
+        || die "vault size resolved to $(numfmt --to=iec --suffix=B "$bytes"); under the 256 MiB floor."
+    printf '%s' "$(( bytes / (1024 * 1024) ))"
+}
+
+# Build a partition device node from a disk + partition number, handling the
+# NVMe/mmc `p` infix (/dev/sdb + 3 -> /dev/sdb3; /dev/nvme0n1 + 3 ->
+# /dev/nvme0n1p3). Pure + unit-tested.
+partition_node() {
+    local dev="$1" num="$2"
+    [[ "$dev" == *[0-9] ]] && printf '%s' "${dev}p${num}" || printf '%s' "${dev}${num}"
+}
+
+# Highest existing partition number on a disk, plus one. After a Ventoy GPT
+# install the disk has p1 (data) + p2 (VTOYEFI), so this returns 3 — the slot
+# for the vault. Pure (reads only lsblk); unit-tested with a stubbed lsblk.
+next_partition_number() {
+    local dev="$1" name max=0 n
+    local base="${dev#/dev/}"
+    while IFS= read -r name; do
+        [[ -n "$name" && "$name" != "$base" ]] || continue
+        n="${name##*[!0-9]}"          # trailing digits = partition number
+        [[ -n "$n" ]] || continue
+        (( n > max )) && max="$n"
+    done < <(lsblk -ln -o NAME "$dev" | tr -d ' ')
+    printf '%s' "$(( max + 1 ))"
+}
+
+# Carve a LUKS2 encrypted vault into the unallocated tail Ventoy reserved
+# (via -r). ext4 inside. The passphrase is entered interactively and stored
+# NOWHERE; nothing auto-opens it on boot (no crypttab, no keyfile). Sealed
+# until the operator runs `cryptsetup open` by hand.
+create_vault_partition() {
+    local dev="$1"
+    local partnum part
+    partnum=$(next_partition_number "$dev")
+    part=$(partition_node "$dev" "$partnum")
+
+    c_bold "=== Creating encrypted vault ($part) ==="
+    echo "  Carving the reserved tail into a LUKS2 partition..."
+    # 0:0 = whole largest free block (the reserved tail); 8309 = Linux LUKS.
+    sudo sgdisk -n "${partnum}:0:0" -t "${partnum}:8309" -c "${partnum}:vault" "$dev" >/dev/null \
+        || die "sgdisk failed to create the vault partition on $dev."
+    sudo partprobe "$dev" 2>/dev/null || true
+    sudo udevadm settle 2>/dev/null || true
+    for _ in $(seq 1 15); do [[ -b "$part" ]] && break; sleep 1; done
+    [[ -b "$part" ]] || die "vault partition $part never appeared after sgdisk."
+
+    echo ""
+    echo "  Set a passphrase for the vault. There is NO recovery if you forget"
+    echo "  it — Hydra stores it nowhere, and nothing auto-unlocks it on boot."
+    local mapper="hydra-vault-$$"
+    sudo cryptsetup luksFormat --type luks2 --batch-mode --verify-passphrase "$part" \
+        || die "LUKS format failed for the vault."
+    sudo cryptsetup open "$part" "$mapper" \
+        || die "luksOpen failed for the vault."
+    sudo mkfs.ext4 -q -L vault "/dev/mapper/$mapper" \
+        || { sudo cryptsetup close "$mapper" 2>/dev/null || true; die "mkfs.ext4 failed for the vault."; }
+    sudo cryptsetup close "$mapper"
+
+    c_green "Encrypted vault ready on $part (ext4 inside LUKS2, sealed)."
+    echo "  Open:    sudo cryptsetup open $part vault && sudo mount /dev/mapper/vault /mnt"
+    echo "  Re-seal: sudo umount /mnt && sudo cryptsetup close vault"
+}
+
 cmd_usb() {
-    local dev="" force=0 allow_non_removable=0 use_gpt=0
+    local dev="" force=0 allow_non_removable=0 use_gpt=0 vault_spec="" vault_mib=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --force|-f)
@@ -391,6 +480,9 @@ cmd_usb() {
                 allow_non_removable=1; shift ;;
             --gpt)
                 use_gpt=1; shift ;;
+            --vault)
+                [[ -n "${2:-}" ]] || die "--vault requires a SIZE value (e.g. '16G', '512M')."
+                vault_spec="$2"; shift 2 ;;
             -*)
                 die "Unknown flag: $1. Try './hydra.sh help'." ;;
             *)
@@ -399,8 +491,26 @@ cmd_usb() {
         esac
     done
 
+    # A vault reserves a LUKS2 tail. Resolve its size now (fails fast on a bad
+    # spec, before any destructive work) and force GPT — the vault is carved
+    # as a 3rd GPT partition, so Ventoy must lay down a GPT table with a
+    # reserved tail to hold it.
+    if [[ -n "$vault_spec" ]]; then
+        vault_mib=$(vault_reserve_mib "$vault_spec")
+        if (( ! use_gpt )); then
+            use_gpt=1
+            c_yellow "--vault: forcing GPT layout (required to carve the encrypted vault partition)."
+        fi
+    fi
+
     preflight_tools "usb" "${HYDRA_TOOLS_USB[@]}"
     validate_usb_device "$dev" "$allow_non_removable"
+    # The vault step needs cryptsetup + mkfs.ext4. Check AFTER validate so a
+    # bad device still fails with the clear "not a block device" message
+    # first (and so the no-vault path never requires these tools).
+    if [[ -n "$vault_spec" ]]; then
+        preflight_tools "usb --vault" cryptsetup mkfs.ext4
+    fi
     # Runtime safety net: even if the operator skipped `./hydra.sh deps`,
     # make sure Ventoy can find the legacy exFAT format binary before we
     # commit to writing the stick.
@@ -414,6 +524,9 @@ cmd_usb() {
     fi
     if (( use_gpt )); then
         c_yellow "--gpt: writing GPT partition table (Ventoy default is MBR)."
+    fi
+    if [[ -n "$vault_spec" ]]; then
+        c_yellow "--vault: reserving ${vault_mib} MiB at the end of $dev for a LUKS2 encrypted vault (set up after the Ventoy install)."
     fi
     # "Now you know. And knowing is half the battle." — G.I. Joe (1985)
     # Hydra's job before the destructive write is to make sure you know what
@@ -432,7 +545,7 @@ cmd_usb() {
     # Confirm Ventoy is extracted before delegating (this helper also
     # auto-extracts the tarball if needed).
     ventoy_installer_path >/dev/null
-    run_ventoy_installer "$VENTOY_EXTRACTED_DIR" "$ventoy_flag" "$dev" "$use_gpt"
+    run_ventoy_installer "$VENTOY_EXTRACTED_DIR" "$ventoy_flag" "$dev" "$use_gpt" "$vault_mib"
 
     # POST-INSTALL VERIFICATION. Ventoy2Disk.sh can exit 0 even when
     # critical tools (mkfs.exfat / mkexfatfs) were missing and the data
@@ -446,6 +559,12 @@ cmd_usb() {
         die "Ventoy2Disk.sh exited 0 but no 'Ventoy'-labelled partition appeared on $dev. The install did NOT take. Check the Ventoy output above for missing tools (e.g. mkfs.exfat / mkexfatfs) and re-run after installing them."
     fi
     c_green "Ventoy installed on $dev (data partition: $part)."
+
+    # With a vault requested, carve + LUKS-format the reserved tail now.
+    if [[ -n "$vault_spec" ]]; then
+        create_vault_partition "$dev"
+    fi
+
     echo ""
     echo "Next: ./hydra.sh copy $dev"
 }
