@@ -23,9 +23,20 @@
 #                                      --gpt installs with a GPT partition table
 #                                        instead of Ventoy's MBR default. Pick GPT
 #                                        for >2 TB drives or modern UEFI-only systems.
-#   ./hydra.sh copy </dev/sdX>        Copy downloaded ISOs to the Ventoy partition.
+#   ./hydra.sh copy </dev/sdX> [--from <DIR|/dev/sdY>]
+#                                      Copy downloaded ISOs to the Ventoy partition.
 #                                      Also copies the file named in
 #                                      HYDRA_WINDOWS_ISO (if set) — see env vars below.
+#                                      --from <DIR>: copy every *.iso in that
+#                                        directory instead of the fixed
+#                                        Ubuntu+Kali set (use ISOs already on hand,
+#                                        no re-download).
+#                                      --from </dev/sdY>: clone the ISOs off an
+#                                        existing Ventoy stick — mounted READ-ONLY,
+#                                        never written. Pair with `usb` to rebuild a
+#                                        bigger stick:
+#                                          ./hydra.sh usb /dev/sdNEW
+#                                          ./hydra.sh copy /dev/sdNEW --from /dev/sdOLD
 #   ./hydra.sh persistence </dev/sdX> [--kali SIZE] [--ubuntu SIZE]
 #                                      Add LUKS-encrypted persistence file(s) on the
 #                                      Ventoy partition. SIZE accepts iec values like
@@ -493,10 +504,45 @@ write_hydra_url_file() {
     c_green "  Wrote Hydra.url -> $HYDRA_REPO_URL"
 }
 
+# Echo the basenames of top-level *.iso files in a directory, one per line.
+# Case-insensitive on the extension (.iso / .ISO), regular files only.
+# Pure + side-effect free so it's unit-testable; the bash glob is sorted,
+# so callers get deterministic order. Used by `copy --from <DIR|DEVICE>`.
+list_source_isos() {
+    local dir="$1" f base
+    [[ -d "$dir" ]] || return 0
+    # `shopt -p OPT` exits 1 when OPT is unset; `|| true` keeps that from
+    # tripping `set -e` on the (normal) case where these are off.
+    local had_nullglob had_nocaseglob
+    had_nullglob=$(shopt -p nullglob || true)
+    had_nocaseglob=$(shopt -p nocaseglob || true)
+    shopt -s nullglob nocaseglob
+    for f in "$dir"/*.iso; do
+        [[ -f "$f" ]] || continue
+        base=$(basename "$f")
+        printf '%s\n' "$base"
+    done
+    # Restore the caller's original glob settings.
+    eval "$had_nullglob"; eval "$had_nocaseglob"
+}
+
 cmd_copy() {
-    local dev="${1:-}"
+    local dev="" from=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --from)
+                [[ -n "${2:-}" ]] || die "--from requires a value (a directory of ISOs, or a source /dev/sdX)."
+                from="$2"; shift 2 ;;
+            -*)
+                die "Unknown flag: $1. Try './hydra.sh help'." ;;
+            *)
+                [[ -z "$dev" ]] || die "copy takes a single device argument (got '$dev' and '$1')."
+                dev="$1"; shift ;;
+        esac
+    done
+
     preflight_tools "copy" "${HYDRA_TOOLS_COPY[@]}"
-    [[ -b "$dev" ]] || die "Usage: ./hydra.sh copy /dev/sdX"
+    [[ -b "$dev" ]] || die "Usage: ./hydra.sh copy /dev/sdX [--from <DIR|/dev/sdY>]"
 
     local part
     part=$(find_ventoy_partition "$dev")
@@ -509,43 +555,49 @@ cmd_copy() {
     # moment unambiguous in the output.
     sudo -v || die "sudo authentication failed."
 
-    local mnt
+    # One EXIT trap owns BOTH the destination mount and, when --from names a
+    # block device, the read-only source mount. src_mnt stays empty unless a
+    # source device is mounted, so a default copy is unchanged. Trap body
+    # tolerates the vars being out of scope under `set -u` (see the persistence
+    # cmd for the same rationale).
+    local mnt src_mnt=""
     mnt=$(mktemp -d -t hydra-ventoy-XXXX)
-    # IMPORTANT: trap body must tolerate `$mnt` being out of scope by the
-    # time the EXIT trap fires (e.g. if a later command tripped `set -e`
-    # and unwound the function stack before the trap ran). `${mnt:-}`
-    # under `set -u` returns empty instead of failing with "unbound
-    # variable", which would mask the real error.
-    # shellcheck disable=SC2154  # _m is assigned inside the trap body string
-    trap '_m="${mnt:-}"; [[ -n "$_m" ]] && { sudo umount "$_m" 2>/dev/null; rmdir "$_m" 2>/dev/null; }' EXIT
+    # shellcheck disable=SC2154  # _m/_s are assigned inside the trap body string
+    trap '_m="${mnt:-}"; _s="${src_mnt:-}";
+          [[ -n "$_s" ]] && { sudo umount "$_s" 2>/dev/null; rmdir "$_s" 2>/dev/null; };
+          [[ -n "$_m" ]] && { sudo umount "$_m" 2>/dev/null; rmdir "$_m" 2>/dev/null; }' EXIT
     sudo mount "$part" "$mnt"
 
-    c_bold "=== Copying ISOs to Ventoy partition ($part -> $mnt) ==="
-    for iso in "$UBUNTU_ISO" "$KALI_ISO"; do
-        local src="$HYDRA_ISO_DIR/$iso"
-        if [[ ! -f "$src" ]]; then
-            c_yellow "  $iso not in $HYDRA_ISO_DIR — skipping. (Run: ./hydra.sh download)"
-            continue
-        fi
-        if [[ -f "$mnt/$iso" ]]; then
-            c_green "  $iso already on Ventoy, skipping."
-            continue
-        fi
-        copy_iso_with_progress "$src" "$mnt/$iso"
-    done
+    if [[ -n "$from" ]]; then
+        copy_isos_from "$from" "$dev" "$mnt"
+    else
+        c_bold "=== Copying ISOs to Ventoy partition ($part -> $mnt) ==="
+        for iso in "$UBUNTU_ISO" "$KALI_ISO"; do
+            local src="$HYDRA_ISO_DIR/$iso"
+            if [[ ! -f "$src" ]]; then
+                c_yellow "  $iso not in $HYDRA_ISO_DIR — skipping. (Run: ./hydra.sh download)"
+                continue
+            fi
+            if [[ -f "$mnt/$iso" ]]; then
+                c_green "  $iso already on Ventoy, skipping."
+                continue
+            fi
+            copy_iso_with_progress "$src" "$mnt/$iso"
+        done
 
-    # Optional BYO Windows ISO. Microsoft doesn't offer a stable direct URL,
-    # so this is a path-to-local-file env var rather than a download step.
-    if [[ -n "${HYDRA_WINDOWS_ISO:-}" ]]; then
-        if [[ ! -f "$HYDRA_WINDOWS_ISO" ]]; then
-            c_yellow "  HYDRA_WINDOWS_ISO=$HYDRA_WINDOWS_ISO not found — skipping."
-        else
-            local win_basename
-            win_basename=$(basename "$HYDRA_WINDOWS_ISO")
-            if [[ -f "$mnt/$win_basename" ]]; then
-                c_green "  $win_basename already on Ventoy, skipping."
+        # Optional BYO Windows ISO. Microsoft doesn't offer a stable direct URL,
+        # so this is a path-to-local-file env var rather than a download step.
+        if [[ -n "${HYDRA_WINDOWS_ISO:-}" ]]; then
+            if [[ ! -f "$HYDRA_WINDOWS_ISO" ]]; then
+                c_yellow "  HYDRA_WINDOWS_ISO=$HYDRA_WINDOWS_ISO not found — skipping."
             else
-                copy_iso_with_progress "$HYDRA_WINDOWS_ISO" "$mnt/$win_basename"
+                local win_basename
+                win_basename=$(basename "$HYDRA_WINDOWS_ISO")
+                if [[ -f "$mnt/$win_basename" ]]; then
+                    c_green "  $win_basename already on Ventoy, skipping."
+                else
+                    copy_iso_with_progress "$HYDRA_WINDOWS_ISO" "$mnt/$win_basename"
+                fi
             fi
         fi
     fi
@@ -554,8 +606,52 @@ cmd_copy() {
     sync
     sudo umount "$mnt"
     rmdir "$mnt"
+    [[ -n "$src_mnt" ]] && { sudo umount "$src_mnt" 2>/dev/null || true; rmdir "$src_mnt" 2>/dev/null || true; }
     trap - EXIT
     c_green "ISOs copied. Eject safely with: sudo eject $dev"
+}
+
+# Copy every *.iso from a --from source onto the already-mounted Ventoy
+# partition. The source is either a directory or a block device (an existing
+# Ventoy stick); devices are mounted READ-ONLY and never written. Sets the
+# caller's `src_mnt` when it mounts a device so the caller's EXIT trap tears
+# it down even on a mid-copy abort. Idempotent: skips ISOs already present.
+copy_isos_from() {
+    local from="$1" dest_dev="$2" mnt="$3"
+    local src_dir
+    if [[ -b "$from" ]]; then
+        [[ "$from" != "$dest_dev" ]] || die "--from source and destination are the same device ($dest_dev)."
+        local spart
+        spart=$(find_ventoy_partition "$from")
+        if [[ -z "$spart" ]]; then
+            # Not a Ventoy-labelled stick — fall back to its first partition.
+            local first
+            first=$(lsblk -ln -o NAME "$from" | tail -n +2 | head -1)
+            [[ -n "$first" ]] || die "No partition found on source device $from."
+            spart="/dev/$first"
+        fi
+        src_mnt=$(mktemp -d -t hydra-src-XXXX)
+        sudo mount -o ro "$spart" "$src_mnt" || die "Could not mount source partition $spart read-only."
+        src_dir="$src_mnt"
+        c_bold "=== Cloning ISOs from $from ($spart, read-only) -> $mnt ==="
+    elif [[ -d "$from" ]]; then
+        src_dir="$from"
+        c_bold "=== Copying ISOs from directory $from -> $mnt ==="
+    else
+        die "--from '$from' is neither a directory nor a block device."
+    fi
+
+    local found=0 iso
+    while IFS= read -r iso; do
+        [[ -n "$iso" ]] || continue
+        found=$((found + 1))
+        if [[ -f "$mnt/$iso" ]]; then
+            c_green "  $iso already on Ventoy, skipping."
+            continue
+        fi
+        copy_iso_with_progress "$src_dir/$iso" "$mnt/$iso"
+    done < <(list_source_isos "$src_dir")
+    (( found > 0 )) || c_yellow "  No .iso files found in $from — nothing to copy."
 }
 
 # Allocate + LUKS-format + ext4 + persistence.conf for one ISO target.
