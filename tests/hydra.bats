@@ -101,6 +101,31 @@ teardown() {
     [[ "$output" != *"Unknown flag"* ]]
 }
 
+@test "usb --vault with no value exits with clear error" {
+    run bash "$HYDRA" usb --vault
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--vault requires a SIZE value"* ]]
+}
+
+@test "usb --vault SIZE is accepted in arg parsing" {
+    # A valid size + a non-existent device: the flag parses, the size
+    # resolves, and the failure comes from the not-a-block-device check —
+    # NOT from "unknown flag".
+    run bash "$HYDRA" usb --vault 16G /dev/this-does-not-exist-XXX
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not a block device"* ]]
+    [[ "$output" != *"Unknown flag"* ]]
+}
+
+@test "usb --vault rejects a bad size before touching the device" {
+    # vault_reserve_mib runs before validate_usb_device, so a garbage size
+    # fails fast with a size error (and never inspects the device).
+    run bash "$HYDRA" usb --vault not-a-size /dev/this-does-not-exist-XXX
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not valid"* ]]
+    [[ "$output" != *"Unknown flag"* ]]
+}
+
 @test "all --gpt is accepted in arg parsing" {
     # cmd_all runs cmd_deps first which calls sudo apt — that fails fast in
     # the bats sandbox. The flag should still parse cleanly though; we check
@@ -223,6 +248,13 @@ teardown() {
     run bash "$HYDRA" help
     [ "$status" -eq 0 ]
     [[ "$output" == *"--gpt"* ]]
+}
+
+@test "help output documents --vault" {
+    run bash "$HYDRA" help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--vault"* ]]
+    [[ "$output" == *"LUKS2"* ]]
 }
 
 @test "help output documents HYDRA_WINDOWS_ISO" {
@@ -543,6 +575,64 @@ EOF
     ! grep -q '^-g$' "$RECORDED_ARGS_FILE"
 }
 
+@test "run_ventoy_installer with reserve_mb inserts -r SIZE before the device" {
+    # Drives `usb --vault`: the reserved tail is requested via Ventoy's -r.
+    # Order must be: ventoy_flag, -g, -r, SIZE, dev.
+    source "$HYDRA"
+
+    local fake_install_dir="$BATS_TEST_TMPDIR/fake-ventoy-reserve"
+    mkdir -p "$fake_install_dir"
+    cat > "$fake_install_dir/Ventoy2Disk.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$RECORDED_ARGS_FILE"
+exit 0
+EOF
+    chmod +x "$fake_install_dir/Ventoy2Disk.sh"
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    export RECORDED_ARGS_FILE="$BATS_TEST_TMPDIR/recorded-args-reserve"
+
+    run_ventoy_installer "$fake_install_dir" "-i" "/dev/loop42" "1" "16384"
+
+    [ -f "$RECORDED_ARGS_FILE" ]
+    # Five args, in order: -i -g -r 16384 /dev/loop42
+    [ "$(sed -n 1p "$RECORDED_ARGS_FILE")" = "-i" ]
+    [ "$(sed -n 2p "$RECORDED_ARGS_FILE")" = "-g" ]
+    [ "$(sed -n 3p "$RECORDED_ARGS_FILE")" = "-r" ]
+    [ "$(sed -n 4p "$RECORDED_ARGS_FILE")" = "16384" ]
+    [ "$(sed -n 5p "$RECORDED_ARGS_FILE")" = "/dev/loop42" ]
+}
+
+@test "run_ventoy_installer with reserve_mb=0 (default) omits -r" {
+    source "$HYDRA"
+
+    local fake_install_dir="$BATS_TEST_TMPDIR/fake-ventoy-noreserve"
+    mkdir -p "$fake_install_dir"
+    cat > "$fake_install_dir/Ventoy2Disk.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$RECORDED_ARGS_FILE"
+exit 0
+EOF
+    chmod +x "$fake_install_dir/Ventoy2Disk.sh"
+    cat > "$STUB_DIR/sudo" <<'EOF'
+#!/usr/bin/env bash
+exec "$@"
+EOF
+    chmod +x "$STUB_DIR/sudo"
+
+    export RECORDED_ARGS_FILE="$BATS_TEST_TMPDIR/recorded-args-noreserve"
+
+    # use_gpt=1, no fifth arg — reserve_mb defaults to 0.
+    run_ventoy_installer "$fake_install_dir" "-i" "/dev/loop42" "1"
+
+    [ -f "$RECORDED_ARGS_FILE" ]
+    ! grep -q '^-r$' "$RECORDED_ARGS_FILE"
+}
+
 @test "run_ventoy_installer pipes 'y' answers on stdin so Ventoy's prompts auto-confirm" {
     source "$HYDRA"
 
@@ -745,6 +835,72 @@ EOF
     local out
     out=$(resolve_persistence_size "10G" $((20*1024*1024*1024)) "Kali" "vfat" 2>/dev/null)
     [ "$out" = "4294967295" ]
+}
+
+@test "vault_reserve_mib: '16G' resolves to 16384 MiB" {
+    source "$HYDRA"
+    run vault_reserve_mib "16G"
+    [ "$status" -eq 0 ]
+    [ "$output" = "16384" ]
+}
+
+@test "vault_reserve_mib: '512M' resolves to 512 MiB" {
+    source "$HYDRA"
+    run vault_reserve_mib "512M"
+    [ "$status" -eq 0 ]
+    [ "$output" = "512" ]
+}
+
+@test "vault_reserve_mib: rejects a garbage size" {
+    source "$HYDRA"
+    run vault_reserve_mib "not-a-size"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not valid"* ]] || [[ "$output" == *"not-a-size"* ]]
+}
+
+@test "vault_reserve_mib: under the 256 MiB floor dies" {
+    source "$HYDRA"
+    run vault_reserve_mib "100M"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"256 MiB"* ]]
+}
+
+@test "partition_node: appends bare number for sdX, p-infix for nvme/mmc" {
+    source "$HYDRA"
+    run partition_node "/dev/sdb" 3
+    [ "$status" -eq 0 ]; [ "$output" = "/dev/sdb3" ]
+    run partition_node "/dev/nvme0n1" 3
+    [ "$status" -eq 0 ]; [ "$output" = "/dev/nvme0n1p3" ]
+    run partition_node "/dev/mmcblk0" 2
+    [ "$status" -eq 0 ]; [ "$output" = "/dev/mmcblk0p2" ]
+}
+
+@test "next_partition_number: returns max existing + 1 (Ventoy GPT -> 3)" {
+    # After a Ventoy GPT install the disk has p1 (data) + p2 (VTOYEFI); the
+    # vault goes in slot 3. Stub lsblk with that layout.
+    source "$HYDRA"
+    cat > "$STUB_DIR/lsblk" <<'EOF'
+#!/usr/bin/env bash
+printf 'sdb\nsdb1\nsdb2\n'
+EOF
+    chmod +x "$STUB_DIR/lsblk"
+    run next_partition_number /dev/sdb
+    [ "$status" -eq 0 ]
+    [ "$output" = "3" ]
+}
+
+@test "next_partition_number: ignores the disk line's trailing digit (nvme)" {
+    # /dev/nvme0n1 ends in a digit; the disk line must NOT be counted as a
+    # partition, or the math would be off. p1+p2 present -> next is 3.
+    source "$HYDRA"
+    cat > "$STUB_DIR/lsblk" <<'EOF'
+#!/usr/bin/env bash
+printf 'nvme0n1\nnvme0n1p1\nnvme0n1p2\n'
+EOF
+    chmod +x "$STUB_DIR/lsblk"
+    run next_partition_number /dev/nvme0n1
+    [ "$status" -eq 0 ]
+    [ "$output" = "3" ]
 }
 
 @test "write_hydra_url_file is idempotent when the file already exists" {
