@@ -148,6 +148,35 @@ teardown() {
     [[ "$output" == *"Usage:"* ]] || [[ "$output" == *"copy"* ]]
 }
 
+@test "copy --from with no value exits with clear error" {
+    run bash "$HYDRA" copy --from
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--from requires a value"* ]]
+}
+
+@test "copy --from <dir> is accepted in arg parsing" {
+    # --from with a value, then a non-existent device: the flag must parse
+    # cleanly and the failure must come from the not-a-block-device check,
+    # not from "unknown flag".
+    run bash "$HYDRA" copy --from /tmp /dev/this-does-not-exist-XXX
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Usage:"* ]]
+    [[ "$output" != *"Unknown flag"* ]]
+}
+
+@test "copy rejects an unknown flag" {
+    run bash "$HYDRA" copy --frobnicate /dev/sda
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Unknown flag"* ]]
+    [[ "$output" == *"frobnicate"* ]]
+}
+
+@test "copy rejects two positional device args" {
+    run bash "$HYDRA" copy /dev/sda /dev/sdb
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"single device"* ]] || [[ "$output" == *"copy takes"* ]]
+}
+
 @test "test with no device argument exits with usage" {
     run bash "$HYDRA" test
     [ "$status" -ne 0 ]
@@ -200,6 +229,12 @@ teardown() {
     run bash "$HYDRA" help
     [ "$status" -eq 0 ]
     [[ "$output" == *"HYDRA_WINDOWS_ISO"* ]]
+}
+
+@test "help output documents copy --from" {
+    run bash "$HYDRA" help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--from"* ]]
 }
 
 @test "persistence with no device argument exits with clear error" {
@@ -1007,6 +1042,62 @@ EOF
     run find_ventoy_partition /dev/sda
     [ "$status" -eq 0 ]
     [ -z "$output" ]
+}
+
+@test "list_source_isos lists only top-level .iso files (case-insensitive)" {
+    # Drives `copy --from`: it must pick up *.iso and *.ISO, skip non-ISO
+    # files, skip directories that merely end in .iso, and not recurse.
+    source "$HYDRA"
+    local d="$BATS_TEST_TMPDIR/iso-src"
+    mkdir -p "$d/subdir"
+    : > "$d/alpha.iso"
+    : > "$d/beta.iso"
+    : > "$d/GAMMA.ISO"
+    : > "$d/notes.txt"
+    mkdir "$d/decoy.iso"            # directory named like an ISO — must be skipped
+    : > "$d/subdir/nested.iso"      # nested — must NOT be listed (no recursion)
+
+    run list_source_isos "$d"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"alpha.iso"* ]]
+    [[ "$output" == *"beta.iso"* ]]
+    [[ "$output" == *"GAMMA.ISO"* ]]
+    [[ "$output" != *"notes.txt"* ]]
+    [[ "$output" != *"decoy.iso"* ]]
+    [[ "$output" != *"nested.iso"* ]]
+    # Exactly three ISOs, one per line.
+    [ "$(printf '%s\n' "$output" | grep -c .)" -eq 3 ]
+}
+
+@test "list_source_isos returns nothing for a directory with no ISOs" {
+    source "$HYDRA"
+    local d="$BATS_TEST_TMPDIR/iso-empty"
+    mkdir -p "$d"
+    : > "$d/readme.txt"
+    run list_source_isos "$d"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "list_source_isos returns nothing for a nonexistent directory" {
+    source "$HYDRA"
+    run list_source_isos "/no/such/dir/abc123"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "list_source_isos leaves the caller's glob options unchanged" {
+    # The helper flips nullglob/nocaseglob; it must restore them so it
+    # doesn't silently change globbing behavior for the rest of the script.
+    source "$HYDRA"
+    shopt -u nullglob nocaseglob
+    # `shopt -p OPT` exits 1 when OPT is off; `|| true` keeps the sourced
+    # `set -e` from aborting the capture.
+    local before_null before_nocase
+    before_null=$(shopt -p nullglob || true); before_nocase=$(shopt -p nocaseglob || true)
+    list_source_isos "$BATS_TEST_TMPDIR" >/dev/null
+    [ "$(shopt -p nullglob || true)" = "$before_null" ]
+    [ "$(shopt -p nocaseglob || true)" = "$before_nocase" ]
 }
 
 @test "cmd_check output lists every tool from the HYDRA_TOOLS_* arrays" {
