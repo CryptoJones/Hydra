@@ -318,7 +318,12 @@ run_ventoy_installer() {
     local -a args=("$ventoy_flag")
     (( use_gpt )) && args+=("-g")
     args+=("$dev")
-    ( cd "$installer_dir" && yes | sudo ./Ventoy2Disk.sh "${args[@]}" )
+    # `yes` feeds Ventoy's endless y/n prompts; when Ventoy exits first, `yes`
+    # gets SIGPIPE (exit 141). With `pipefail` on (set at the top of this
+    # script) that 141 would mask Ventoy2Disk.sh's own exit status, so scope
+    # pipefail OFF for just this pipeline — we care about the installer's
+    # result, not yes's.
+    ( cd "$installer_dir" && set +o pipefail && yes | sudo ./Ventoy2Disk.sh "${args[@]}" )
 }
 
 # Resolve the Ventoy installer path inside the extracted dir.

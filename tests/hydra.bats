@@ -588,16 +588,14 @@ EOF
 
     run ensure_mkexfatfs_alias
     [ "$status" -eq 0 ]
-    # No sudo invocation should have happened.
+    # No sudo invocation should have happened. bats folds stderr into $output
+    # by default (no --separate-stderr), so this one check covers both streams;
+    # $stderr is unset here and would trip `set -u` if referenced.
     [[ "$output" != *"SUDO-CALLED"* ]]
-    [[ "$stderr" != *"SUDO-CALLED"* ]] || true  # bats merges streams by default
 }
 
 @test "ensure_mkexfatfs_alias does nothing when neither binary is present" {
     source "$HYDRA"
-    # Wipe both names out of the test PATH by setting PATH to only the stub dir,
-    # which currently contains neither binary.
-    PATH="$STUB_DIR"
 
     cat > "$STUB_DIR/sudo" <<'EOF'
 #!/usr/bin/env bash
@@ -606,7 +604,13 @@ exit 0
 EOF
     chmod +x "$STUB_DIR/sudo"
 
+    # Hide both mkexfatfs and mkfs.exfat by restricting PATH to the stub dir
+    # (which holds only sudo) for just this call, then restore so coreutils
+    # stay available for the remaining assertions and teardown.
+    local saved_path="$PATH"
+    PATH="$STUB_DIR"
     run ensure_mkexfatfs_alias
+    PATH="$saved_path"
     [ "$status" -eq 0 ]
     [[ "$output" != *"SUDO-CALLED"* ]]
 }
@@ -628,7 +632,14 @@ exit 0
 EOF
     chmod +x "$STUB_DIR/sudo"
 
+    # Restrict PATH to the stub dir for the call so a real mkexfatfs on the
+    # host can't shadow the "mkexfatfs absent" premise; restore afterward.
+    # bash must stay reachable — the stub scripts are `#!/usr/bin/env bash`.
+    ln -sf "$(command -v bash)" "$STUB_DIR/bash"
+    local saved_path="$PATH"
+    PATH="$STUB_DIR"
     run ensure_mkexfatfs_alias
+    PATH="$saved_path"
     [ "$status" -eq 0 ]
     [[ "$output" == *"SUDO:"* ]]
     [[ "$output" == *"ln -sf"* ]]
@@ -661,7 +672,11 @@ EOF
 }
 
 @test "HYDRA_REPO_URL env var overrides the default" {
-    HYDRA_REPO_URL="https://example.test/forked-hydra" source "$HYDRA"
+    # Must be a standalone export, not a `VAR=val source ...` prefix: bash
+    # unwinds a command-prefix assignment after the builtin returns, leaving
+    # HYDRA_REPO_URL unbound (and tripping `set -u`) on the next line.
+    export HYDRA_REPO_URL="https://example.test/forked-hydra"
+    source "$HYDRA"
     [[ "$HYDRA_REPO_URL" == "https://example.test/forked-hydra" ]]
 }
 
@@ -859,12 +874,9 @@ EOF
 }
 
 @test "copy_iso_with_progress falls back to cp when pv is missing" {
-    # pv intentionally absent — stub PATH only contains sudo. The helper
+    # pv intentionally absent — stub PATH only contains sudo + cp. The helper
     # must still complete via the cp fallback.
     source "$HYDRA"
-
-    # Make sure pv is genuinely off PATH for this test.
-    PATH="$STUB_DIR"
 
     cat > "$STUB_DIR/sudo" <<'EOF'
 #!/usr/bin/env bash
@@ -886,7 +898,15 @@ EOF
     local dst="$BATS_TEST_TMPDIR/dest.iso"
     printf 'fake iso payload' > "$src"
 
+    # Make pv genuinely off PATH for just this call, then restore so grep +
+    # teardown's rm keep working. The stub dir must still reach bash (stub
+    # shebangs are `#!/usr/bin/env bash`) and basename (the helper calls it).
+    ln -sf "$(command -v bash)" "$STUB_DIR/bash"
+    ln -sf "$(command -v basename)" "$STUB_DIR/basename"
+    local saved_path="$PATH"
+    PATH="$STUB_DIR"
     run copy_iso_with_progress "$src" "$dst"
+    PATH="$saved_path"
     [ "$status" -eq 0 ]
     [[ "$output" == *"no pv on PATH"* ]]
     grep -q '^CP-CALLED' "$STUB_LOG"
