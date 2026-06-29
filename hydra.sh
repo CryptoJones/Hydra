@@ -901,6 +901,21 @@ update_ventoy_persistence_config() {
     fi
 }
 
+# Pure + side-effect free (only stats files under $1): echo the first per-OS
+# persistence .dat that already exists on the mounted partition AND is targeted
+# by this run (a non-empty size arg). Empty output = nothing already there.
+# Kept side-effect-free so it's unit-testable without a real mount.
+existing_persistence_dat() {
+    local mnt="$1" kali_size="$2" ubuntu_size="$3" dat
+    for dat in "${kali_size:+persistence-kali.dat}" "${ubuntu_size:+persistence-ubuntu.dat}"; do
+        if [[ -n "$dat" && -f "$mnt/$dat" ]]; then
+            printf '%s\n' "$dat"
+            return 0
+        fi
+    done
+    return 0
+}
+
 cmd_persistence() {
     local dev=""
     local kali_size_arg="" ubuntu_size_arg=""
@@ -958,6 +973,17 @@ cmd_persistence() {
     trap cleanup EXIT INT TERM
 
     sudo mount "$part" "$mnt"
+
+    # Detect an existing per-OS persistence file BEFORE the space-budget math,
+    # so a stick that already has persistence reports the real cause (the
+    # existing .dat already eating the partition) instead of a misleading
+    # "Only X MB free" error. Only the OS(es) this run targets are checked, so
+    # adding a second OS's persistence to a stick that already has the first
+    # still works.
+    local existing_dat
+    existing_dat=$(existing_persistence_dat "$mnt" "$kali_size" "$ubuntu_size")
+    [[ -z "$existing_dat" ]] \
+        || die "$existing_dat already exists on $part. Remove it first to recreate it, or skip this step — persistence may already be set up (boot the Live entry and choose Encrypted Persistence)."
 
     local fs_type avail_bytes
     fs_type=$(findmnt -no FSTYPE "$mnt")
