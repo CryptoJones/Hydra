@@ -837,6 +837,47 @@ EOF
     [ "$out" = "4294967295" ]
 }
 
+@test "existing_persistence_dat: returns kali .dat when present and kali is targeted" {
+    source "$HYDRA"
+    local mnt; mnt="$(mktemp -d -t hydra-dat-XXXX)"
+    : > "$mnt/persistence-kali.dat"
+    run existing_persistence_dat "$mnt" "max" ""
+    [ "$status" -eq 0 ]
+    [ "$output" = "persistence-kali.dat" ]
+    rm -rf "$mnt"
+}
+
+@test "existing_persistence_dat: silent when the targeted .dat is absent" {
+    source "$HYDRA"
+    local mnt; mnt="$(mktemp -d -t hydra-dat-XXXX)"
+    run existing_persistence_dat "$mnt" "max" "2G"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$mnt"
+}
+
+@test "existing_persistence_dat: ignores a .dat for an OS this run does not target" {
+    # kali.dat exists but this run only targets ubuntu -> no false positive,
+    # so a second OS can be added to a stick that already has the first.
+    source "$HYDRA"
+    local mnt; mnt="$(mktemp -d -t hydra-dat-XXXX)"
+    : > "$mnt/persistence-kali.dat"
+    run existing_persistence_dat "$mnt" "" "2G"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    rm -rf "$mnt"
+}
+
+@test "existing_persistence_dat: detects the ubuntu .dat when ubuntu is targeted" {
+    source "$HYDRA"
+    local mnt; mnt="$(mktemp -d -t hydra-dat-XXXX)"
+    : > "$mnt/persistence-ubuntu.dat"
+    run existing_persistence_dat "$mnt" "" "max"
+    [ "$status" -eq 0 ]
+    [ "$output" = "persistence-ubuntu.dat" ]
+    rm -rf "$mnt"
+}
+
 @test "vault_reserve_mib: '16G' resolves to 16384 MiB" {
     source "$HYDRA"
     run vault_reserve_mib "16G"
